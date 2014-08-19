@@ -12,8 +12,8 @@ package sgisync;
 #
 ###############################################################################
 #
-# Version:		0.5
-# Last updated:	24/01/2008	Stuart Shelton [SRCS]
+# Version:		0.51
+# Last updated:	01/02/2008	Stuart Shelton [SRCS]
 #
 # Changes:
 # 0.1			Fork from nekosync
@@ -22,13 +22,14 @@ package sgisync;
 # 0.4			Download and unpack functionality added, sync
 #				with nekosync 1.2r22
 # 0.5			Cleanups and '--list'
+# 0.51			Fix display of which package owns clashing files
 #
 
 use strict;
 
 use Data::Dumper;
 
-use constant VERSION => "0.5";
+use constant VERSION => "0.51";
 use constant RELEASE => "6.5.30";
 
 use constant TRUE => 1;
@@ -597,11 +598,14 @@ sub unpackfiles( \@$$ ) {
 
 				if( exists $instfiles{ $filename } ) {
 					$messages{ $file } = "$filename from $name clashes with "
-					                   . "files from another package"
+					                   . "files from another\n\tpackage"
 					                   . ( defined $lastname
-					                     ? "\n\t(probably $lastname)" : "" );
+					                     ? " (probably $lastname)" : "" );
 				} else {
-					$lastname = $name;
+					# Change of logic here - only a few files should have a
+					# change of clashing, so only remember tardists with one
+					# of these...
+					$lastname = $name if $filename =~ m/swmgr\.README/i or not defined $lastname;
 					my $size = $fields[ 2 ];
 					$instfiles{ $filename } = $size;
 					if( scalar( my $result = stat( "$iloc/$filename" ) ) ) {
@@ -807,7 +811,7 @@ sub syncdist( $$$$\% ) {
 	           . ( 1 == scalar( @oldpackages ) ? " is" : "s are" )
 	           . " obsolete and $number " . ( 1 == $number ? "file is"
 	                                                       : "files are" )
-	           . " new or ha" . ( 1 == $number ? "s" : "ve" ) . " been "
+	           . " new or ha" . ( 1 == $number ? "s" : "ve" ) . "\nbeen "
 	           . "modified\n\n";
 
 
