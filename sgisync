@@ -25,6 +25,7 @@ package sgisync;
 # 0.51			Fix display of which package owns clashing files
 # 0.6			Escape username and password strings
 # 0.61			... without needing URI::Escape ;)
+# 0.62			Clean up output, be more permissive with --list
 #
 
 #
@@ -37,13 +38,14 @@ use strict;
 #use Data::Dumper;
 #use URI::Escape;
 
-use constant VERSION => "0.61";
+use constant VERSION => "0.62";
 use constant RELEASE => "6.5.30";
 
 use constant TRUE => 1;
 use constant FALSE => 0;
 
 my $name = 'sgisync';
+my $agent = $name . "/" . VERSION;
 
 use File::stat;
 use Getopt::Long;
@@ -260,7 +262,8 @@ sub checkforupdate( $ ) {
 	return "Utility setup incomplete" unless defined $curl and defined $site
 		and defined $update;
 
-	my $command = join( ' ', $curl, '-f "' . "$site/$update" . '"', "|" );
+	my $command = join( ' ', $curl, '-A "' . $agent . '"'
+		                   , '-f "' . "$site/$update" . '"', "|" );
 	qopen( my $File, $command ) or return undef;
 	while( <$File> ) {
 		chomp;
@@ -361,6 +364,10 @@ sub dumpconfig( ;$ ) {
 
 	print "\nGeneral settings\n";
 	print "----------------\n\n";
+	print "IRIX version:                --release    = " . ( defined( $release ) ? "\"$release\"" : "<not set>" ) . "\n";
+	print "SupportFolio username:       --user       = " . ( defined( $sgiuser ) ? "\"$sgiuser\"" : "<not set>" ) . "\n";
+	print "SupportFolio password:       --pass       = " . ( defined( $sgipass ) ? "<set>" : "<not set>" ) . "\n";
+	print "\n";
 	print "Verbose output:              --"
 	    . ( $verbose ? "" : "no" ) . "verbose\n";
 	print "Debug output:                --"
@@ -523,7 +530,7 @@ sub removeoldfiles( $$$\@ ) {
 		if( defined $width && not $verbose ) {
 			if( ( $counter + 30 ) > $width ) {
 				$counter = 0;
-				print STDOUT "\n" . " " x 30;
+				print "\n" . " " x 30;
 			}
 		}
 	}
@@ -556,7 +563,7 @@ sub findorphanfiles( $\% ) {
 		if( defined $width && not $verbose ) {
 			if( ( $counter + 30 ) > $width ) {
 				$counter = 0;
-				print STDOUT "\n" . " " x 30;
+				print "\n" . " " x 30;
 			}
 		}
 	}
@@ -590,7 +597,7 @@ sub unpackfiles( \@$$ ) {
 		my $replace = FALSE;
 		my $state;
 
-		ifverbose( "Processing " . $name . "\n" );
+		ifverbose( "Processing " . $name . " ...\n" );
 		my $command = join( ' ', $tar, "-tvf", '"' . "$dloc/$file" . '"', "|" );
 		qopen( my $File, $command )
 			or die "${fatal}Cannot open pipe to $tar: $!\n";
@@ -692,7 +699,7 @@ sub unpackfiles( \@$$ ) {
 		if( defined $width && not $verbose ) {
 			if( ( $counter + 30 ) > $width ) {
 				$counter = 0;
-				print STDOUT "\n" . " " x 30;
+				print "\n" . " " x 30;
 			}
 		}
 	}
@@ -738,6 +745,7 @@ sub syncdist( $$$$\% ) {
 
 	chdir $dloc or die "${fatal}Cannot chdir to \"$dloc\"\n";
 	ifnotverbose( "\nChecking for updated files   " );
+	print "\n" if $debug;
 	foreach my $patch ( sort( keys( %$patches ) ) ) {
 		my $download = $patches -> { $patch }{ 'download' };
 		( my $file = $download ) =~ s!^.*/([^/]+)$!$1!;		#!# Fix highlighting
@@ -783,7 +791,7 @@ sub syncdist( $$$$\% ) {
 		if( defined $width && not $verbose ) {
 			if( ( $counter + 30 ) > $width ) {
 				$counter = 0;
-				print STDOUT "\n" . " " x 30;
+				print "\n" . " " x 30;
 			}
 		}
 	}
@@ -806,7 +814,7 @@ sub syncdist( $$$$\% ) {
 			if( defined $width && not $verbose ) {
 				if( ( $counter + 30 ) > $width ) {
 					$counter = 0;
-					print STDOUT "\n" . " " x 30;
+					print "\n" . " " x 30;
 				}
 			}
 		}
@@ -817,14 +825,14 @@ sub syncdist( $$$$\% ) {
 	my $spaces = length( $number );
 
 	ifnotverbose( "\n" );
-	print STDOUT "\n" . $uptodate . " file" . ( 1 == $uptodate ? " is"
-	                                                           : "s are" )
-	           . " up to date, " . scalar( @oldpackages) . " file"
-	           . ( 1 == scalar( @oldpackages ) ? " is" : "s are" )
-	           . " obsolete and $number " . ( 1 == $number ? "file is"
-	                                                       : "files are" )
-	           . " new or ha" . ( 1 == $number ? "s" : "ve" ) . "\nbeen "
-	           . "modified\n\n";
+	print "\n" . $uptodate . " file" . ( 1 == $uptodate ? " is"
+	                                                    : "s are" )
+	     . " up to date, " . scalar( @oldpackages) . " file"
+	     . ( 1 == scalar( @oldpackages ) ? " is" : "s are" )
+	     . " obsolete and $number " . ( 1 == $number ? "file is"
+	                                                 : "files are" )
+	     . " new or ha" . ( 1 == $number ? "s" : "ve" ) . "\nbeen "
+	     . "modified\n\n";
 
 
 	if( scalar( @oldpackages ) >= $warnlevel ) {
@@ -837,12 +845,19 @@ sub syncdist( $$$$\% ) {
 	@downloads = sort( @downloads );
 	$number = 0;
 
-	while( my $download = pop @downloads ) {
-		( my $file = $download ) =~ s!^.*/([^/]+)$!$1!;		#!# Fix highlighting
-		open( my $OutFile, ">", $dloc . "/" . $file )
-			or die "${fatal}Cannot open $file for writing: $!\n";
-		print $OutFile curlget( $download, undef, $number++, undef, FALSE, 10 );
-		close( $OutFile );
+	if( @downloads ) {
+		print "Downloading IRIX $release patches ... "
+			. ( ( not $debug and not $verbose ) ? "|" : " " )
+			if not $debug and not $verbose;
+		while( my $download = pop @downloads ) {
+			( my $file = $download ) =~ s!^.*/([^/]+)$!$1!; #!# Fix highlighting
+			open( my $OutFile, ">", $dloc . "/" . $file )
+				or die "${fatal}Cannot open $file for writing: $!\n";
+			print $OutFile curlget( $download, undef, $number++, undef
+				                  , FALSE, 10 );
+			close( $OutFile );
+		}
+		print "\bdone\n\n" if not $verbose;
 	}
 
 	my @files;
@@ -866,18 +881,19 @@ sub curlget( $;$$$$$ ) {
 
 	my $args = ( defined $options ? join( ' ', $options, $curlargs )
 	                              : $curlargs );
-	my $command = join( ' ', $curl, $args,
+	my $command = join( ' ', $curl, '-A "' . $agent . '"', $args,
 	                    ( defined $form ? '-d "' . $form . '"'
 	                                    : ''
 	                    ), '--location "' . $page . '"', "|" );
 	( my $displaypage = $page ) =~ s/\?.*$//;
-	if( not $quiet and $verbose ) {
-		print STDOUT "(" . ( $number < 100 ? " "
-		                                   : "" )
-		                 . ( $number <  10 ? " "
-		                                   : "" )
-		                 . $number . ") $displaypage ...  ";
-		print STDOUT "\n" if $debug;
+	if( not $quiet ) {
+		if( $verbose ) {
+			print "(" . ( $number < 100 ? " " : "" )
+			          . ( $number <  10 ? " " : "" )
+			          . $number . ") $displaypage ... "
+			    . ( ( not $quiet and not $debug ) ? "|" : " " );
+			print "\n" if $debug;
+		}
 		ifdebug( "Running \"$command\"" );
 	}
 	qopen( my $InFile, $command )
@@ -887,15 +903,14 @@ sub curlget( $;$$$$$ ) {
 	my @characters = ( '/', '-', '\\', '|' );
 	my $size = scalar( @characters );
 	while( my $data = <$InFile> ) {
-		if( not $debug and not $quiet and not $verbose and 0 eq ( $iteration++ % $modulus ) ) {
-			print STDOUT "\b"
-			           . $characters[ $counter++ % $size ];
+		if( not $quiet and not $debug and 0 eq ( $iteration++ % $modulus ) ) {
+			print "\b" . $characters[ $counter++ % $size ];
 		}
 		$output .= "$data";
 	}
 	$globalcounter = $counter % $size if not $verbose;
 	if( close( $InFile ) ) {
-		print STDOUT "\bdone\n" if not $quiet and not $debug and $verbose;
+		print "\bdone\n" if not $quiet and not $debug and $verbose;
 		return $output;
 	} else {
 		ifnotverbose( "\b\n" ) if not $quiet;
@@ -933,14 +948,14 @@ sub main() {
 			}
 			if( $showconfig and defined $configfile ) {
 				if( -r $configfile ) {
-					print STDOUT "$name " . VERSION . " $configname values:\n";
+					print "$name " . VERSION . " $configname values:\n";
 					dumpconfig( $configfile );
 					exit 0;
 				} else {
 					die "No configuration file found\n";
 				}
 			} elsif( $showconfig ) {
-				print STDOUT "$name " . VERSION . " $configname values:\n";
+				print "$name " . VERSION . " $configname values:\n";
 				dumpconfig();
 				exit 0;
 			}
@@ -997,24 +1012,24 @@ sub main() {
 	) or die "\n";
 
 	if( defined $opt_version and $opt_version ) {
-		print STDOUT "$name version " . VERSION . "\n";
+		print "$name version " . VERSION . "\n";
 		exit 0;
 	}
 	if( defined $opt_help and $opt_help ) {
-		print STDOUT "Usage: $name [--user=<username>] [--pass=<password>] [settings] [options]\n\n";
-		print STDOUT "                 settings = { [--dist=<path>] [--inst=<path>] [--temp=<path>]\n";
-		print STDOUT "                              [--old=<directory>]\n";
-		print STDOUT "                              [--release=<IRIX release>]\n";
-		print STDOUT "                              [--path=<path>] [--tar=<path>] [--curl=<path>]\n";
-		print STDOUT "                              [--warn=<number>] [--width=<number>]\n";
-		print STDOUT "                            }\n";
-		print STDOUT "                 options  = { [--colour] [--configured] [--debug]\n";
-		print STDOUT "                              [--delete] [--extract] [--list] [--pretend]\n";
-		print STDOUT "                              [--safe] [--showconfig[=default|=file|=actual]]\n";
-		print STDOUT "                              [--swmgr] [--update] [--verbose]\n";
-		print STDOUT "                            }\n";
-		print STDOUT "\n";
-		print STDOUT "                 Note: --debug implies --pretend, use --nopretend to override.\n";
+		print "Usage: $name [--user=<username>] [--pass=<password>] [settings] [options]\n\n";
+		print "                 settings = { [--dist=<path>] [--inst=<path>] [--temp=<path>]\n";
+		print "                              [--old=<directory>]\n";
+		print "                              [--release=<IRIX release>]\n";
+		print "                              [--path=<path>] [--tar=<path>] [--curl=<path>]\n";
+		print "                              [--warn=<number>] [--width=<number>]\n";
+		print "                            }\n";
+		print "                 options  = { [--colour] [--configured] [--debug]\n";
+		print "                              [--delete] [--extract] [--list] [--pretend]\n";
+		print "                              [--safe] [--showconfig[=default|=file|=actual]]\n";
+		print "                              [--swmgr] [--update] [--verbose]\n";
+		print "                            }\n";
+		print "\n";
+		print "                 Note: --debug implies --pretend, use --nopretend to override.\n";
 		exit 0;
 	}
 
@@ -1124,7 +1139,7 @@ sub main() {
 		$opt_release = RELEASE;
 	}
 	$release = $opt_release;
-	if( not $list ) {
+	if( not $list and not ( defined $opt_check and $opt_check ) ) {
 		print STDERR "\n";
 		print STDERR "${info}Using IRIX release $release\n\n";
 	}
@@ -1144,10 +1159,10 @@ sub main() {
 	$curl = undef unless -x $curl;
 
 	if( defined $opt_check and $opt_check ) {
+		ifverbose( "Checking version information...\n" );
 		my $latest = checkforupdate( TRUE );
 		if( defined $latest ) {
-			print STDOUT "$name " . VERSION . " is up to date\n"
-				if $latest eq "";
+			print "$name " . VERSION . " is up to date\n" if $latest eq "";
 			exit 0;
 		} else {
 			print STDERR "Cannot download version information from\n"
@@ -1160,7 +1175,7 @@ sub main() {
 		if( $opt_show eq "default" or $opt_show eq "file" ) {
 			die "${fatal}Uncaught show option: $opt_show\n";
 		} elsif( $opt_show eq "" or $opt_show eq "actual" ) {
-			print STDOUT "$name " . VERSION . " actual values:\n";
+			print "$name " . VERSION . " actual values:\n";
 			dumpconfig( $extconf );
 			exit 0;
 		} else {
@@ -1189,6 +1204,7 @@ sub main() {
 	$width = undef if $debug;
 
 	if( $updatecheck ) {
+		ifverbose( "Checking version information...\n" );
 		my $latest = checkforupdate( TRUE );
 		if( defined $latest ) {
 			print "\n" unless $latest eq "";
@@ -1229,13 +1245,20 @@ sub main() {
 	my $page = 'http://support.sgi.com/';
 	my $form = undef;
 
-	setupdirs( $distloc, $instloc, $oldloc );
-	die "${fatal}No write access to \"$distloc\"\n" unless -d $distloc and -w $distloc;
-	die "${fatal}No write access to \"$instloc\"\n" unless -d $instloc and -w $instloc;
-	die "${fatal}No write access to \"$distloc/$oldloc\"\n" if not $delete and ( not -d "$distloc/$oldloc" or not -w "$distloc/$oldloc/" );
+	if( not $list ) {
+		setupdirs( $distloc, $instloc, $oldloc );
+		die "${fatal}No write access to \"$distloc\"\n"
+			unless -d $distloc and -w $distloc;
+		die "${fatal}No write access to \"$instloc\"\n"
+			unless -d $instloc and -w $instloc;
+		die "${fatal}No write access to \"$distloc/$oldloc\"\n" if not $delete
+			and ( not -d "$distloc/$oldloc" or not -w "$distloc/$oldloc/" );
+	}
 
 #	return FALSE unless -d $dloc and -w $dloc;
-	print STDOUT "Fetching data from support.sgi.com, please wait ...  " if not $verbose;
+	print "Fetching data from support.sgi.com, please wait ... "
+	            . ( ( not $debug and not $verbose ) ? "|" : " " )
+		if not $debug and not $verbose;
 
 #	if( $debug and $verbose ) {
 #		print curlget( $page, $form, $fetch++ );
@@ -1245,16 +1268,16 @@ sub main() {
 #	}
 
 	$page = 'https://support.sgi.com/login';
-#	$form = uri_escape( "PAGE_NAME=LOGIN&USER_ID=$sgiuser&PASSWORD=$sgipass" );
-	$form = $escape -> ( "PAGE_NAME=LOGIN&USER_ID=$sgiuser&PASSWORD=$sgipass" );
-	print STDOUT "      Logging in with username $sgiuser, password $sgipass "
-	           . "...\n" if defined $sgiuser and defined $sgipass and $verbose;
-#	if( $debug and $verbose ) {
-#		print curlget( $page, $form, $fetch++ );
-#	} else {
+	$form = "PAGE_NAME=LOGIN&ORIGINAL_URL=%2F&ORIGINAL_QUERY=&USER_ID=" . $escape -> ( $sgiuser ) . "&PASSWORD=" . $escape -> ( $sgipass ) . "&Sign+In.x=0&Sign+In.y=0";
+	print "      Logging in with username $sgiuser, password $sgipass ...\n"
+		if defined $sgiuser and defined $sgipass and $verbose and not $debug;
+	ifdebug( "form data is \"$form\"" );
+	if( $debug and $verbose ) {
+		print curlget( $page, $form, $fetch++ );
+	} else {
 		die "Page fetch error\n"
 		    if not defined curlget( $page, $form, $fetch++ );
-#	}
+	}
 
 	$page = "https://support.sgi.com/browse_request/irix_patches_by_os";
 	$form = "PAGE_LIST_SIZE=-1";
@@ -1266,9 +1289,12 @@ sub main() {
 		die "Page fetch error\n" if not defined $document;
 #	}
 	if( $debug or $list or $document !~ m/$release/i ) {
+		print "\berror\n" if $document !~ m/$release/i;
+		print "\bdone\n" if $list and not $verbose;
+		print "\n" if $list;
 		my $releaseokay = FALSE;
 		my @document = split( /\n/, $document );
-		print STDOUT "\nAvailable IRIX releases:\n" if $list;
+		print "Available IRIX releases:\n" if $list;
 		my $counter = 1;
 		foreach my $line ( grep( m!<td align="left" >IRIX ([0-9.mf]+)</td>!g,
 		                         @document ) ) {
@@ -1281,7 +1307,9 @@ sub main() {
 			$releaseokay = TRUE if $version eq $release;
 		}
 		if( $list ) {
-			print STDOUT "\n";
+			print "\n" if not $verbose;
+			print "\n${warn}IRIX release $release not found\n"
+				if not $releaseokay;
 			exit 0;
 		}
 		die "${fatal}IRIX release $release not found\n" if not $releaseokay;
@@ -1356,10 +1384,12 @@ sub main() {
 #		}
 		if( not $seenlicense and
 		    $document =~ m!^.*<textarea[^>]+>(.*)</textarea>!s ) {
-			print "\bdone\n" if not $verbose;
+			print "\bdone\n" if not $debug and not $verbose;
 			print "\n$1\n\n";
 			$seenlicense = TRUE;
-			print STDOUT "Continuing to fetch data from support.sgi.com, please wait ...  " if not $verbose;
+			print "Continuing to fetch data from support.sgi.com"
+				. ", please wait ... " . ( $debug ? "\n" : "|" )
+				if not $verbose;
 		}
 
 		$document =~ s/^.*<form method="POST"\n/<form method="POST" /s;
@@ -1396,7 +1426,7 @@ sub main() {
 	}
 
 	# Close message from main() - this is messy :(
-	print STDOUT "\bdone\n" if not $verbose;
+	print "\bdone\n" if not $debug and not $verbose;
 
 	syncdist( $distloc, $instloc, $oldloc, $delete, %patches );
 
@@ -1406,10 +1436,10 @@ sub main() {
 		    and -x "/usr/sbin/SoftwareManager"
 		  ) {
 			$command = "/usr/sbin/SoftwareManager";
-			print STDOUT "Launching SoftwareManager... ";
+			print "Launching SoftwareManager... ";
 		} elsif( -x "/usr/sbin/inst" ) {
 			$command = "/usr/sbin/inst";
-			print STDOUT "Launching inst... ";
+			print "Launching inst... ";
 		} else {
 			print STDERR "${fatal}SoftwareManager not present or \$DISPLAY not "
 			           . "set and inst not present\n";
@@ -1426,7 +1456,7 @@ sub main() {
 		die "\tPlease check the output of \"$name --show\" for configuration "
 		  . "problems\n";
 	} else {
-		print STDOUT "\n$name finished at " . gmtime() . "\n";
+		print "\n$name finished at " . gmtime() . "\n";
 		exit 0;
 	}
 } # main
