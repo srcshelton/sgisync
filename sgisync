@@ -1,106 +1,53 @@
 #!/bin/sh
-if test -n "`perl -V | grep "5\.0"`"
-then
-	echo -n "FATAL: You appear to have perl "
-	for WORD in `perl -v | grep "^This is "`
-	do  
-		echo $WORD
-	done | grep "5" | xargs echo -n
-	echo ", but version 5.8 is required."
-	exit 1
-fi
 exec perl -wx $0 "$@"
 	if 0;
 #!perl -w
-#line 16
+#line 6
 
-package nekosync;
+package sgisync;
 
 ###############################################################################
 #
-# nekosync - based on tardist2inst, with added MD5 checking...
+# sgisync - Automatically fetch IRIX patches from support.sgi.com
 #
 ###############################################################################
 #
-# Version:		1.2
-# Last updated:	03/06/2008	Stuart Shelton [SRCS]
+# Version:		0.4
+# Last updated:	23/01/2008	Stuart Shelton [SRCS]
 #
 # Changes:
-# 1.2			Add command-line support
-# 				Add support for unlimited $extra locations
-# 1.1			Add rsync support
-# 				Code cleanup
-# 1.0			Initial release
+# 0.1			Fork from nekosync
+# 0.2			Sync with nekosync 1.2r21, merge with sgifetch
+# 0.3			Can now actually determine download locations!
+# 0.4			Download and unpack functionality added, sync with nekosync 1.2r22
 #
-
-require 5.008008;
 
 use strict;
 
-use constant VERSION => "1.2r25";
+use Data::Dumper;
+
+use constant VERSION => "0.4";
+use constant RELEASE => "6.5.30";
+
 use constant TRUE => 1;
 use constant FALSE => 0;
 
-my $name = 'nekosync';
-
-#
-# Note that, unfortunately, there is no support for the version of Perl packaged
-# with IRIX.
-#
-# Even via CPAN, the Digest::MD5 module cannot be built because the native Perl
-# is deemed too old - and since that is vital to this code's operation, I've
-# not even attempted to build the other necessary modules (notably List::Util,
-# which is only actually used once, and so is an ideal candidate for inlining)
-# required to run.
-#
+my $name = 'sgisync';
 
 use File::stat;
 use Getopt::Long;
 use IO::Handle;
-use IO::Socket;
-#use List::Util qw( max );
-
-eval "use List::Util qw( max );";
-if( $@ ) {
-	warn "I can't find the List::Util Perl module on this system, which is "
-	   . "required for\n";
-	warn "$name to run correctly.\n";
-	warn "Please install this module via your favourite package-management "
-	   . "system,\n";
-	warn "manually from a nekoware mirror, or via CPAN.\n\n";
-	warn "This can be achieved by running:\n\n\tperl -w -MCPAN -eshell\n\n";
-	warn "... and then typing:\n\n\tinstall List::Util\n\n";
-	die "Please re-run $0 once List::Util is installed.\n";
-}
-
-my $usemd5sum = FALSE;
-
-eval "use Digest::MD5;";
-if( $@ ) {
-	warn "I can't find the Digest::MD5 Perl module on this system, which is "
-	   . "required for\n";
-	warn "$name to run correctly.\n";
-	warn "Please install this module via your favourite package-management "
-	   . "system,\n";
-	warn "manually from a nekoware mirror, or via CPAN.\n\n";
-	warn "This can be achieved by running:\n\n\tperl -w -MCPAN -eshell\n\n";
-	warn "... and then typing:\n\n\tinstall Digest::MD5\n\n";
-	die "Please re-run $0 once Digest::MD5 is installed.\n";
-#	warn "Will attempt to fall back to \"md5sum\" binary...\n\n";
-	$usemd5sum = TRUE;
-}
 
 use Symbol qw( qualify_to_ref gensym );
 
 
 #
-## Forward declarations - helps to find things ;)
+# Forward declarations - helps to find things ;)
 #
 sub ifverbose( $;$ );
 sub ifnotverbose( $ );
 sub ifdebug( $;$ );
 sub ifnotdebug( $ );
-sub httphead( $$\% );
 sub getheader( $$ );
 sub qopen( *;$$ );
 sub readconfig( $ );
@@ -111,37 +58,26 @@ sub setupdirs( $$$ );
 sub removeoldfiles( $$$\@ );
 sub findorphanfiles( $\% );
 sub unpackfiles( \@$$ );
-sub getdist( $$$$ );
-sub syncdist( $$$ );
+sub getdist( $$$$\% );
+sub curlget( $;$$$$$ );
 sub main();
 
 
-my $site = 'http://raw.githubusercontent.com/srcshelton/nekosync';
-my $update = "master/history/$name.history";
+my $site = 'http://raw.githubusercontent.com/srcshelton/' . $name;
+my $update = 'master/history/' . $name . '.history';
 
 ## Variables below here can be over-ridden in the config file
 
-my $distloc = '/usr/tmp/nekoware/dist';
-my $instloc = '/usr/tmp/nekoware/inst';
-my $oldloc  = 'obsolete';
+my $distloc = '/usr/tmp/support.sgi.com/dist';
+my $instloc = '/usr/tmp/support.sgi.com/inst';
+my $oldloc  = 'old';
 my $tmploc  = '/usr/tmp';
 
 my $gnupath = '/usr/nekoware/bin';
 
-my $indexfile;
+my $release;
 
-my ( $md5sum, $tar, $pax, $get, $rsync );
-
-my $getargs = "-q --passive-ftp -nd -np -U '$name/" . VERSION . "' -O";
-my $getchecktimeout = '-t3 -T5';
-my $gettimeout = '-t5 -T10';
-my $mirror = 'http://www.nekochan.net/nekoware/current';
-my $index = 'descript.ion';
-my $extra = undef;
-my $rsyncdefargs = "-budltOS --delete-after -T $tmploc --suffix= --numeric-ids";
-my $rsyncargs = '';
-my $rmirror = 'rsync.nekochan.net::nekoware/current/*.tardist';
-my $useget = TRUE;
+my ( $tar, $curl, $curlargs );
 
 my $verbose = FALSE;
 my $debug = FALSE;
@@ -150,7 +86,7 @@ my $pretend = TRUE;
 my $delete = FALSE;
 my $extract = TRUE;
 
-my $warnlevel = 10;
+my $warnlevel = 5;
 
 my $usecolour = FALSE;
 my $termcolour = FALSE;
@@ -175,6 +111,10 @@ my $info   = "INFO:   ";
 my $notice = "NOTICE: ";
 my $warn   = "WARN:   ";
 my $fatal  = "FATAL:  ";
+
+my $fetch = 0;	# Index from zero ;)
+my $sgiuser;
+my $sgipass;
 
 
 #
@@ -242,62 +182,6 @@ sub ifnotdebug( $ ) {
 	return ifdebug( undef, shift );
 } # ifnotdebug
 
-sub httphead( $$\% ) {
-	my ( $host, $path, $response ) = @_;
-
-	return undef unless defined $host and defined $path;
-
-	my $socket = new IO::Socket::INET (
-		  PeerAddr => $host
-		, PeerPort => '80'
-		, Proto    => 'tcp'
-	) or return undef;
-
-	print $socket "HEAD $path HTTP/1.0\r\n";
-	print $socket "Host: $host\r\n";
-	print $socket "Connection: close\r\n";
-	print $socket "\r\n";
-
-	my $result = <$socket>;
-	my $headers = join( '', <$socket> );
-
-	close $socket;
-
-	if(( defined $result and $result ) and ( defined $headers and $headers )) {
-		$response -> { result } = $result;
-		$response -> { headers } = $headers;
-		return TRUE;
-	} else {
-		return undef;
-	}
-} # httphead
-
-sub getheader( $$ ) {
-	my ( $url, $header ) = @_;
-
-	return undef unless defined $url;
-
-	my $host = $1 if $url =~ m!^(?:ht|f)tp://([^/?&;]+)!;
-	my $path = $1 if $url =~ m!^(?:ht|f)tp://[^/?&;]+(/[^?&;]+)!;
-
-	return undef unless defined $host and defined $path;
-
-	my %response;
-	return undef if not httphead( $host, $path, %response );
-
-	if( defined $header and defined $response{ headers } ) {
-		foreach my $line ( split( /\r\n/, $response{ headers } ) ) {
-			if( $line =~ m/^$header: (.*)$/imo ) {
-				return $1;
-			}
-		}
-	} elsif( defined $response{ result } ) {
-		return $response{ result };
-	}
-
-	return undef;
-} # getheader
-
 #
 # Scary wrapper around open to redirect STDERR away from the console
 #  - thanks, Paul! :)
@@ -359,11 +243,10 @@ sub checkforupdate( $ ) {
 	my $message = shift;
 	my $version;
 
-	return "Utility setup incomplete" unless defined $get and defined $site
+	return "Utility setup incomplete" unless defined $curl and defined $site
 		and defined $update;
 
-	my $command = join( ' ', $get, $getchecktimeout, $getargs, "-"
-	                       , '"' . "$site/$update" . '"', "|" );
+	my $command = join( ' ', $curl, '-f "' . "$site/$update" . '"', "|" );
 	qopen( my $File, $command ) or return undef;
 	while( <$File> ) {
 		chomp;
@@ -429,24 +312,11 @@ sub dumpconfig( ;$ ) {
 	print "\nBinary locations\n";
 	print "----------------\n\n";
 	# What can we look for to try to guess whether this path is sound?
-	if( defined $gnupath and -d $gnupath ) {
-		print "" . ( -x "$gnupath/env" ? "$okay "
-		                               : "$marginal " )
-		    . "Path to GNU binaries:    --path       = \"$gnupath\"\n";
-	} else {
-		print "" . ( ( defined $gnupath and -x "$gnupath/env" ) ? "$okay "
-		                                                        : "$warning " )
-		    . "Path to GNU binaries:    --path"
-		    . ( defined $gnupath ? "       = \"$gnupath\""
-		                         : "          $notfound" ) . "\n";
-	}
-	if( $usemd5sum and defined $md5sum ) {
-		print "" . ( -x "$md5sum" ? "$okay " : "$warning " )
-		    . "md5sum command:                       = \"$md5sum\"\n";
-	} elsif( $usemd5sum ) {
-		print "$warning md5sum command:                          "
-		    . "$notfound\n"
-	}
+	print "" . ( ( defined $gnupath and -x "$gnupath/curl" ) ? "$okay "
+	                                                         : "$warning " )
+	    . "Path to GNU binaries:    --path"
+	    . ( defined $gnupath ? "       = \"$gnupath\""
+	                         : "          $notfound" ) . "\n";
 	if( defined $tar ) {
 		if( -x $tar ) {
 			eval { system( "$tar --version >/dev/null 2>&1" ) };
@@ -466,99 +336,17 @@ sub dumpconfig( ;$ ) {
 		print "$warning tar command:             --tar           "
 		    . "$notfound\n"
 	}
-	if( defined $pax ) {
-		print "" . ( -x "$pax" ? "$okay " : "$warning " )
-		    . "pax command:             --pax        = \"$pax ...\"\n";
-	} else {
-		print "$warning pax command:             --pax           "
-		    . "$notfound\n"
-	}
-	if( defined $get ) {
+	if( defined $curl ) {
 		my $space = '';
-		$space = ' ' if ( defined $getargs and not $getargs eq "" ) or
-		                ( defined $gettimeout and not $gettimeout eq "" );
-		print "" . ( -x "$get" ? "$okay " : "$warning " )
-		    . "get command:             --wget       = \""
-		    . join( $space, $get, $gettimeout, $getargs ) . " -\"\n";
+		print "" . ( -x "$curl" ? "$okay " : "$warning " )
+		    . "curl command:            --curl       = \"$curl ...\"\n";
 	} else {
-		print "$warning get command:             --wget          "
+		print "$warning curl command:            --curl          "
 		    . "$notfound\n";
-	}
-	if( defined $rsync and not $rsync eq "/usr/sbin/rsync") {
-		my $space = '';
-		$space = " " if defined $rsyncargs and not $rsyncargs eq "";
-		print "" . ( -x "$rsync" ? "$okay " : "$warning " )
-		    . "sync command:            --rsync      = "
-		    . "\"$rsync $rsyncdefargs$space$rsyncargs ...\"\n";
-	} else {
-		print "$warning sync command:            --rsync         "
-		    . "$notfound\n";
-	}
-	if( defined $rsync and $rsync eq "/usr/sbin/rsync" ) {
-		print STDERR "\n    ${bold}RCS Rsync (/usr/sbin/rsync) found instead "
-		    . "of Samba rsync - please\n";
-		print STDERR "    specify --rsync or --path to correct$reset\n\n";
-	}
-
-	print "\nDownload locations\n";
-	print "------------------\n\n";
-	if( defined $index ) {
-		print "    Index file:                             \"$index\"\n";
-		my $response;
-		if( defined $mirror ) {
-			$response = getheader( "$mirror/$index", undef );
-			print "" . ( ( defined $response and $response  =~ m/200/ )
-			    ? "$okay " : "$warning " )
-			    . "HTTP mirror:             --mirror     = \"$mirror\"\n";
-		} else {
-			print "$warning HTTP mirror:             --mirror        $notfound"
-			    . "\n";
-		}
-	} else {
-		print "$warning Index file:                              $notfound\n";
-		print "$warning HTTP mirror:             --mirror        $notfound\n";
-	}
-	if( defined $mirror and defined $extra ) {
-		( my $root = $mirror ) =~ s#/current(/)?##;
-		my @paths = split / /, $extra;
-		my $first = shift @paths;
-		my $last = pop @paths;
-		my $current = ( $first =~ m#^(ht|f)tp://# ? "$first"
-		                                          : "$root/$first" );
-		my $response = getheader( "$current/$index", undef );
-		print "" . ( ( defined $response and $response =~ m/200/ )
-		    ? "$okay " : "$warning " )
-		    . "Additional locations:    --extra      = \"$current";
-		foreach my $element ( @paths ) {
-			$current = ( $element =~ m#^(ht|f)tp://# ? "$element"
-		                                             : "$root/$element" );
-			$response = getheader( "$current/$index", undef );
-			print "\n" . ( ( defined $response and $response =~ m/200/ )
-			    ? "$okay " : "$warning " )
-			    . "                                         $current";
-		}
-		if( defined $last ) {
-			$current = ( $last =~ m#^(ht|f)tp://# ? "$last"
-			                                      : "$root/$last" );
-			$response = getheader( "$current/$index", undef );
-			print "\n" . ( ( defined $response and $response =~ m/200/ )
-			    ? "$okay " : "$warning " )
-			    . "                                         $current\"\n"
-		} else {
-			print "\"\n";
-		}
-	}
-	if( defined $rmirror ) {
-		print "    rsync mirror:            --mirror     = \"$rmirror\"\n";
-	} else {
-		print "$warning rsync mirror:            --mirror        $notfound\n";
 	}
 
 	print "\nGeneral settings\n";
 	print "----------------\n\n";
-	print "Synchronisation method:      --"
-	    . ( $useget ? "get" : "sync" ) . "\n";
-	print "\n";
 	print "Verbose output:              --"
 	    . ( $verbose ? "" : "no" ) . "verbose\n";
 	print "Debug output:                --"
@@ -592,9 +380,9 @@ sub dumpconfig( ;$ ) {
 	                                                   : "${error}no$noerror" ) . "\n";
 	print "\nVersions\n";
 	print "--------\n\n";
-	print "$name version:                           \"" . VERSION . "\"\n";
+	print "$name version:                            \"" . VERSION . "\"\n";
 	if( $updatecheck ) {
-		print "$name latest version:                    ";
+		print "$name latest version:                     ";
 		my $latest = checkforupdate( FALSE );
 		if( defined $latest ) {
 			if( $latest eq "" ) {
@@ -608,7 +396,7 @@ sub dumpconfig( ;$ ) {
 			print " unknown\n";
 			$latest = "unknown";
 		}
-		print "$name is up to date:                      $latest\n";
+		print "$name is up to date:                       $latest\n";
 	}
 	print "Check for updates?           --update     =  "
 	    . ( $updatecheck ? "yes" : "no" ) . "\n";
@@ -776,72 +564,12 @@ sub unpackfiles( \@$$ ) {
 	ifnotverbose( "Unpacking updated files       " );
 	ifdebug( "\n" );
 
-	sub pkgsort {
-		my $shortcmp = FALSE;
-		my ( $namea, $nameb );
-
-		if( $a =~ m/^neko_(.*)-[0-9].*$/ ) {
-			( $namea ) = ( lc( $a ) =~ m/^(?:neko_)?(.*)[-_][0-9].*$/ );
-		} else {
-			( $namea ) = ( lc( $a ) =~ m/(?:neko_)?(.*)\.tardist$/ );
-			$shortcmp = TRUE;
-		}
-
-		if( $b =~ m/^neko_(.*)-[0-9].*$/ ) {
-			( $nameb ) = ( lc( $b ) =~ m/^(?:neko_)?(.*)[-_][0-9].*$/ );
-		} else {
-			( $nameb ) = ( lc( $b ) =~ m/(?:neko_)?(.*)\.tardist$/ );
-			$shortcmp = TRUE;
-		}
-
-		return ( $namea cmp $nameb ) if $shortcmp;
-
-		if( $namea eq $nameb ) {
-			my ( $vera ) = ( $a =~ m/^.*[-_]([0-9].*)\.tardist$/ );
-			my ( $verb ) = ( $b =~ m/^.*[-_]([0-9].*)\.tardist$/ );
-
-			$vera =~ s/[[:alpha:]]//g;
-			$vera =~ s/[-_]/./g;
-			$vera =~ s/\.+/./g;
-			$verb =~ s/[[:alpha:]]//g;
-			$verb =~ s/[-_]/./g;
-			$verb =~ s/\.+/./g;
-
-			my @numbersa = split( /\./, $vera );
-			my @numbersb = split( /\./, $verb );
-
-			my $max = max( scalar @numbersa, scalar @numbersb );
-			for( my $n = 0 ; $n <= $max ; $n++ ) {
-				my $numa = $numbersa[ $n ];
-				my $numb = $numbersb[ $n ];
-				my $existsa = defined $numa;
-				my $existsb = defined $numb;
-
-				# NB: Backwards - we want the highest version number first!
-				if( $existsa and $existsb ) {
-					return $numb <=> $numa if $numa != $numb;
-				} elsif( $existsa ) {
-					return -1;
-				} elsif( $existsb ) {
-					return 1;
-				} else {
-					return 0;
-				}
-			}
-			return 0;
-		} else {
-			return $namea cmp $nameb;
-		}
-	}
-
 	my $counter = 0;
-	my @list = sort pkgsort @$files;
 	my $continue = TRUE;
 
-	foreach my $file ( @list ) {
-		my ( $name ) = ( $file =~ m/^(?:neko_)?(.*)\.tardist$/ );
+	foreach my $file ( @$files ) {
+		my ( $name ) = ( $file =~ m/^(.*)\.tardist$/ );
 
-		my $extradirs;
 		my $replace = FALSE;
 		my $state;
 
@@ -860,21 +588,11 @@ sub unpackfiles( \@$$ ) {
 				} else {
 					die "${fatal}Invalid output read from $tar\n";
 				}
-				if( $filename =~ m#tmp/# ) {
-					ifverbose( "$warn$filename from $name is within a "
-						. "subdirectory - attempting to correct...\n" );
-					if( defined $pax and -x $pax ) {
-						$errors{ $file } = "$file contains directory entries"
-						. "\n\tcorrection with pax attempted...";
-					} else {
-						$errors{ $file } = "$file contains directory entries";
-					}
-					( $extradirs = $filename ) =~ s:^(.*/)[^/]+$:$1: ;
-					$filename =~ s:^.*/([^/]+)$:$1: ;
-					$state = '!';
-				}
-				if( defined $instfiles{ $filename } ) {
-					$messages{ $file } = "$name clashes with files from "
+				# tardists include an empty directory entry...
+				next if not $filename;
+
+				if( exists $instfiles{ $filename } ) {
+					$messages{ $file } = "$filename from $name clashes with files from "
 					                   . "another package"
 					                   . ( defined $lastname
 					                     ? "\n\t(probably $lastname)" : "" );
@@ -896,44 +614,21 @@ sub unpackfiles( \@$$ ) {
 				}
 				if( $replace ) {
 					my $command;
-					if( defined $extradirs ) {
-						if( defined $pax and -x $pax ) {
-							if( defined $debug ) {
-								$command = join( ' ', 'cd "' . "$iloc" . '" &&'
-									                , $pax, '-rvf'
-									                , '"' . "$dloc/$file" . '"'
-									                , "-s :${extradirs}::p"
-									                , ';', 'cd -'
-								                    , '>/dev/null 2>&1' );
-							} else {
-								$command = join( ' ', 'cd "' . "$iloc" . '" &&'
-									                , $pax, "-rs :$extradirs::"
-									                , '-f'
-									                , '"' . "$dloc/$file" . '"'
-									                , '>/dev/null 2>&1'
-									                , ';', 'cd -'
-								                    , '>/dev/null 2>&1' );
-							}
-						} else {
-							undef $command;
-						}
+					eval { system( "$tar --version >/dev/null 2>&1" ) };
+					if( $@ or $? ) {
+						# Assume SGI tar
+						$command = join( ' ', 'cd "' . "$iloc" . '" &&'
+						                    , $tar, '-xf'
+						                    , '"' . "$dloc/$file" . '"'
+						                    , '>/dev/null 2>&1' 
+						                    , ';', 'cd -'
+						                    , '>/dev/null 2>&1' );
 					} else {
-						eval { system( "$tar --version >/dev/null 2>&1" ) };
-						if( $@ or $? ) {
-							# Assume SGI tar
-							$command = join( ' ', 'cd "' . "$iloc" . '" &&'
-							                    , $tar, '-xf'
-							                    , '"' . "$dloc/$file" . '"'
-							                    , '>/dev/null 2>&1' 
-							                    , ';', 'cd -'
-							                    , '>/dev/null 2>&1' );
-						} else {
-							# Assume GNU tar
-							$command = join( ' ', $tar, '-xf'
-							                    , '"' . "$dloc/$file" . '"'
-							                    , '-C' , $iloc
-							                    , '>/dev/null 2>&1' );
-						}
+						# Assume GNU tar
+						$command = join( ' ', $tar, '-xf'
+						                    , '"' . "$dloc/$file" . '"'
+						                    , '-C' , $iloc
+						                    , '>/dev/null 2>&1' );
 					}
 					ifdebug( "$green\$command is \"$command\"" )
 						if defined $command;
@@ -1001,148 +696,64 @@ sub unpackfiles( \@$$ ) {
 	}
 } # unpackfiles
 
-sub getdist( $$$$ ) {
-	my ( $dloc, $iloc, $oloc, $delete ) = @_;
-	my %md5sums;
+sub getdist( $$$$\% ) {
+	my ( $dloc, $iloc, $oloc, $delete, $patches ) = @_;
 	my @downloads;
 	my @oldpackages;
 	my $counter = 0;
 	my $checksum;
 
 	return FALSE unless defined $dloc;
-	return FALSE unless defined $index and defined $mirror;
-	return FALSE unless defined $get and -x $get;
+	return FALSE unless $patches;
+	return FALSE unless defined $curl and -x $curl;
 
 	setupdirs( $dloc, $iloc, $oloc );
 	return FALSE unless -d $dloc and -w $dloc;
 
 	autoflush STDOUT TRUE;
-	if( not defined $indexfile ) {
-		ifverbose( "Downloading $index from $mirror/ - please wait...",
-				"Downloading and parsing index file, please wait..." );
-		ifdebug( "\n\n" );
-	} else {
-		print( "Using $indexfile as package list..." );
-	}
-
-	my $warning = FALSE;
-	my $needsupdate = FALSE;
 
 	my $contents = undef;
 	my $File;
-	if( not defined $indexfile ) {
-		my $command = join( ' ', $get, $gettimeout, $getargs, "- "
-		                       , '"' . $mirror . "/" . $index . '"', "|" );
-		qopen( $File, $command )
-			or die "${fatal}Cannot open pipe to $get: $!\n";
-	} else {
-		open( $File, "<", $indexfile )
-			or die "${fatal}Cannot open $indexfile for reading: $!\n";
-	}
+
+	my $uptodate = 0;
+
 	chdir $dloc or die "${fatal}Cannot chdir to \"$dloc\"\n";
-	while( <$File> ) {
-		my @fields = split( /\s+/ );
-		if( scalar( @fields ) ) {
-			my $filename = $fields[ 0 ];
-			my $line = join( ' ', @fields );
-			if( $line =~ m/[[:space:]]([[:xdigit:]]{32})[[:space:]]/ ) {
-				my $sum = $1;
-				$md5sums{ $filename } = $sum;
-				ifdebug( "Found sum $sum for file $filename\n" );
-			} else {
-				if( not $warning ) {
-					ifdebug( "Cannot identify MD5 sum for file "
-					       . "$filename - skipping further MD5 checks\n" );
-					$warning = TRUE;
-				}
-				if( defined( my $size = getheader( join( '/', $mirror
-				                                            , $filename )
-				                                 , "Content-Length" ) ) ) {
-					ifdebug( "Found size $size for file $filename\n" );
-					$md5sums{ $filename } = $size;
-				} else {
-					ifnotdebug( "\n" ) unless $needsupdate;
-					print STDERR "${warn}Can't find MD5 sum or file size for "
-					           . "$filename\n";
-					$needsupdate = TRUE;
-				}
-			}
-			$contents .= $line;
+	ifnotverbose( "\nChecking for updated files   " );
+	foreach my $patch ( sort( keys( %$patches ) ) ) {
+		my $download = $patches -> { $patch }{ 'download' };
+		( my $file = $download ) =~ s!^.*/([^/]+)$!$1!;		#!# Fix vim syntax highlighting
+		$patches -> { $patch }{ 'file' } = $file;
+
+		if( curlget( $download, undef, $fetch++, "--head", TRUE ) =~ m/\r\nContent-Length:\s+(\d+)\r\n/is ) {
+			$patches -> { $patch }{ 'size' } = $1;
+		} else {
+			ifdebug( "Could not retrieve size for $file from server: removing" );
+			delete $patches -> { $patch };
+			next;
 		}
-	}
-	close( $File );
+		ifdebug( "Found size " . $patches -> { $patch }{ 'size' } . " for $file\n" );
 
-	if( $warning and not $needsupdate ) {
-		print STDERR "\n${warn}MD5 sums in $index corrupt or not present\n"
-		           . "        Please contact mirror maintainer\n";
-		ifnotdebug( "\n" );
-	}
-	if( $needsupdate ) {
-		print STDERR "\n${notice}Index may be out of date - please contact "
-		           . "mirror maintainer\n";
-		ifnotdebug( "\n" );
-	}
-	if( not %md5sums ) {
-		print STDERR "\n${warn}Specified directory $mirror/ is empty, or "
-		           . "network disconnected\n";
-		return FALSE;
-	}
-
-	if( defined $contents and not $usemd5sum ) {
-		ifdebug( "Generating MD5 sum of $index... " );
-		my $digest = Digest::MD5 -> new();
-		$digest -> add( $contents );
-		$checksum = $digest -> hexdigest();
-		$digest = undef;
-		ifdebug( $checksum . "\n" );
-	}
-
-	foreach my $file ( sort( keys( %md5sums ) ) ) {
-		delete $md5sums{ $file } unless $file =~ /\.tardist$/;
-	}
-	ifverbose( " read " . keys( %md5sums ) . " packages\n"
-	         , ( ( $debug || $warning || $needsupdate ) ? "" : " done" )
-	         . "\nChecking for updated packages " );
-	ifdebug( "\n" );
-
-	foreach my $file ( sort( keys( %md5sums ) ) ) {
 		ifdebug( "Looking for " . $file . "\n" );
 		if( -r $file ) {
 			open( my $File, "<", $file )
 				or die "${fatal}Cannot open $file: $!\n";
-			if( length( $md5sums{ $file } ) eq 32 ) {
-				my $digest = Digest::MD5 -> new();
-				$digest -> addfile( $File );
-				my $sum = $digest -> hexdigest();
-				$digest = undef;
-				if( $sum eq $md5sums{ $file } ) {
-					ifverbose( "$file is up to date\n",
-					         ( $debug ? undef : $dot ) );
-					$counter++ if defined $width;
-				} else {
-					ifverbose( "$file: Digest $sum does not match archive "
-					         . "digest " . $md5sums{ $file } . "\n", $star );
-					push( @downloads, $file );
-					$counter++ if defined $width;
-				}
+			my $result = stat( $file )
+				or die "stat() failed on $dloc/$file\n";
+			my $size = $result -> size;
+			if( $size eq $patches -> { $patch }{ 'size' } ) {
+				ifverbose( "$file is of correct size\n",
+				         ( $debug ? undef : $dot ) );
+				$uptodate++;
+				$counter++ if defined $width;
 			} else {
-				my $result = stat( $file )
-					or die "stat() failed on $dloc/$file\n";
-				my $size = $result -> size;
-				if( $size eq $md5sums{ $file } ) {
-					ifverbose( "$file is of correct size\n",
-					         ( $debug ? undef : $dot ) );
-					$counter++ if defined $width;
-				} else {
-					ifverbose( "$file: File size $size does not match archive "
-					         . "file length " . $md5sums{ $file } . "\n"
-					         , $star );
-					push( @downloads, $file );
-					$counter++ if defined $width;
-				}
+				ifverbose( "$file: File size $size does not match server "
+				         . "file length " . $patches -> { $patch }{ 'size' } . "\n"
+				         , $star );
+				push( @downloads, $download );
+				$counter++ if defined $width;
 			}
 		} else {
-			push( @downloads, $file );
+			push( @downloads, $download );
 			ifverbose( $file . ": Does not exist on local filesystem\n"
 			         , $plus );
 			$counter++ if defined $width;
@@ -1161,7 +772,10 @@ sub getdist( $$$$ ) {
 		while( my $file = pop @files ) {
 			next if -d "$dloc/$file";
 			next unless $file =~ /\.tardist$/;
-			if( not( defined $md5sums{ $file } ) ) {
+
+			( my $patch = $file ) =~ s/[^\d]//g;
+			$patch =~ s/^0+//g;
+			if( not( exists $patches -> { $patch } ) ) {
 				push( @oldpackages, "$dloc/$file" );
 				ifverbose( "${yellow}INFO:    $file removed from remote "
 				         . "archive\n", $dash );
@@ -1181,10 +795,15 @@ sub getdist( $$$$ ) {
 	my $spaces = length( $number );
 
 	ifnotverbose( "\n" );
-	print STDOUT "\n" . scalar( @oldpackages) . " files are obsolete and "
-	           . "$number " . ( 1 == $number ? "file is" : "files are" )
+	print STDOUT "\n" . $uptodate . " file" . ( 1 == $uptodate ? " is"
+	                                                           : "s are" )
+	           . " up to date, " . scalar( @oldpackages) . " file"
+	           . ( 1 == scalar( @oldpackages ) ? " is" : "s are" )
+	           . " obsolete and $number " . ( 1 == $number ? "file is"
+	                                                       : "files are" )
 	           . " new or ha" . ( 1 == $number ? "s" : "ve" ) . " been "
 	           . "modified\n\n";
+
 
 	if( scalar( @oldpackages ) >= $warnlevel ) {
 		print STDERR "\n${warn}More than $warnlevel packages will be "
@@ -1196,137 +815,67 @@ sub getdist( $$$$ ) {
 	@downloads = sort( @downloads );
 	$number = 0;
 
-	while( my $file = pop @downloads ) {
-		$number++;
-		my $command = join( ' ', $get, $gettimeout, $getargs, "-"
-		                       , '"' . $mirror . "/" . $file . '"', "|" );
-		print STDOUT "(" . ( " " x ( $spaces - length( $number ) ) ) . $number
-		           . ") Downloading $file  ";
-		qopen( my $InFile, $command )
-			or die "${fatal}Cannot open pipe to $get: $!\n";
+	while( my $download = pop @downloads ) {
+		( my $file = $download ) =~ s!^.*/([^/]+)$!$1!;		#!# Fix vim syntax highlighting
 		open( my $OutFile, ">", $dloc . "/" . $file )
 			or die "${fatal}Cannot open $file for writing: $!\n";
-		my $counter = 0;
-		my $iteration = 0;
-		my @characters = ( '/', '-', '\\', '|' );
-		while( my $data = <$InFile> ) {
-			if( 0 eq ( $iteration++ % 20 ) ) {
-				print STDOUT "\b"
-				           . $characters[ $counter++ % scalar( @characters ) ];
-			}
-			print $OutFile $data;
-		}
+		print $OutFile curlget( $download, undef, $number++, undef, FALSE, 10 );
 		close( $OutFile );
-		if( close( $InFile ) ) {
-			print STDOUT "\bdone\n";
-		} else {
-			ifnotverbose( "\b\n" );
-			print STDERR "$warn$get returned $? - Bad descript.ion or "
-			           . "corrupt download?\n";
-		}
 	}
 
-	if( not defined $indexfile and not $usemd5sum ) {
-		ifdebug( "\nGenerating second MD5 sum of $index..." );
-		{
-			my $contents = undef;
-			my $command = join( ' ', $get, $gettimeout, $getargs, "- "
-			                       , '"' . $mirror . "/" . $index . '"', "|" );
-			qopen( my $File, $command )
-				or die "${fatal}Cannot open pipe to $get: $!\n";
-			while( <$File> ) {
-				my @fields = split( /\s+/ );
-				if( scalar( @fields ) ) {
-					my $line = join( ' ', @fields );
-					$contents .= $line;
-				}
-			}
-			close( $File );
-			if( defined $contents ) {
-				if( defined $checksum ) {
-					my $digest = Digest::MD5 -> new();
-					$digest -> add( $contents );
-					if( $checksum ne $digest -> hexdigest() ) {
-						die "$fatal$index changed during operation - please "
-						  . "try again...\n"
-					}
-					$digest = undef;
-					ifdebug( " checksums match\n\n" );
-				} else {
-					print STDERR "${warn}Cannot generate checksums - was a "
-					           . "valid index downloaded?\n";
-				}
-			} else {
-				die "$fatal$index no longer exists, cannot verify downloaded "
-				  . "packages\n        Please check server connectivity and "
-				  . "try again...\n"
-			}
-		}
+	my @files;
+	foreach my $patch ( sort( keys( %$patches ) ) ) {
+		push @files, $patches -> { $patch }{ 'file' };
 	}
-
-	my @files = keys( %md5sums );
 	unpackfiles( @files, $dloc, $iloc ) if defined $iloc and $extract;
 	removeoldfiles( $dloc, $oloc, $delete, @oldpackages );
 	return undef;
 } # getdist
 
-sub syncdist( $$$ ) {
-	my ( $dloc, $iloc, $oloc ) = @_;
-	my @tardists;
-	my $counter = 0;
-
-	return FALSE unless defined $dloc;
-	return FALSE unless defined $rmirror;
-	return FALSE unless defined $rsync and -x $rsync;
-
-	setupdirs( $dloc, $iloc, $oloc );
-	return FALSE unless -d $dloc and -w $dloc;
-	return FALSE if defined $oloc and not ( -d "$dloc/$oloc"
-	                                    and -w "$dloc/$oloc" );
+sub curlget( $;$$$$$ ) {
+	my ( $page, $form, $number, $options, $quiet, $speed ) = @_;
+	my $modulus = 1;
+	my $output = '';
 
 	autoflush STDOUT TRUE;
-	chdir $dloc or die "${fatal}Cannot chdir to \"$dloc\"\n";
-	ifverbose( "Starting rsync connection to $rmirror - please wait... \n"
-	         , "Starting rsync, please wait...\n" );
-	my $backup = '';
-	$backup = "--backup-dir '$dloc/$oloc'" if defined $oloc;
-	my $command = join( ' ', $rsync, $rsyncargs , $backup, $rmirror
-	                       , '"' . "$dloc" . '"' );
-	ifverbose( "Executing $command\n" );
-	system( $command ) == 0 or die "rsync failed: $?\n";
 
-	print STDOUT "\n";
-	print STDOUT "Reading directory contents    ";
+	$modulus = $speed if defined $speed;
+	$quiet = FALSE if not defined $quiet;
 
-	opendir( my $Dist, $dloc )
-		or die "${fatal}Cannot opendir on \"$dloc\": $!\n";
-	{
-		my @files = readdir( $Dist );
-		while( my $file = pop @files ) {
-			next if -d $file;
-			next unless $file =~ /\.tardist$/;
-			push( @tardists, "$file" );
-			ifnotverbose( $dot );
-			$counter++ if defined $width;
-			if( defined $width && not $verbose ) {
-				if( ( $counter + 30 ) > $width ) {
-					$counter = 0;
-					print STDOUT "\n" . " " x 30;
-				}
-			}
-		}
-		closedir( $Dist );
+	my $args = ( defined $options ? join( ' ', $options, $curlargs ) : $curlargs );
+	my $command = join( ' ', $curl, $args, ( defined $form ? '-d "' . $form . '"' : '' ), '--location "' . $page . '"', "|" );
+	( my $displaypage = $page ) =~ s/\?.*$//;
+	if( not $quiet ) {
+		print STDOUT "(" . ( $number < 100 ? " " : "" ) . ( $number < 10 ? " " : "" ) . $number . ") Fetching $displaypage ...\t";
+		print STDOUT "\n" if $debug;
+		ifdebug( "Running \"$command\"" );
 	}
-	print STDOUT "\n";
-
-	return unpackfiles( @tardists, $dloc, $iloc ) if defined $iloc and $extract;
-	return undef;
-} # syncdist
+	qopen( my $InFile, $command )
+	    or die "${fatal}Cannot open pipe to $curl: $!\n";
+	my $counter = 0;
+	my $iteration = 0;
+	my @characters = ( '/', '-', '\\', '|' );
+	while( my $data = <$InFile> ) {
+		if( not $debug and not $quiet and 0 eq ( $iteration++ % $modulus ) ) {
+			print STDOUT "\b"
+			           . $characters[ $counter++ % scalar( @characters ) ];
+		}
+		$output .= "$data";
+	}
+	if( close( $InFile ) ) {
+		print STDOUT "\bdone\n" if not $debug and not $quiet;
+		return $output;
+	} else {
+		ifnotverbose( "\b\n" ) if not $quiet;
+		print STDERR "$warn$curl returned $? - Bad path or "
+		           . "corrupt download?\n";
+		return undef;
+	}
+} # curlget
 
 sub main() {
 	our ( $opt_version, $opt_help, $opt_colour, $opt_show, $opt_configured
-	    , $opt_mirror, $opt_get, $opt_wget, $opt_sync, $opt_rsync, $opt_width
-	    , $opt_check , $opt_extract, $opt_pretend );
+	    , $opt_pretend, $opt_width, $opt_check, $opt_extract, $opt_release );
 
 	sub showconfig( $;$$ ) {
 		my ( $optionname, $configfile, $configname ) = @_;
@@ -1380,8 +929,6 @@ sub main() {
 		# edited...
 		$configured = undef;
 		eval readconfig( $extconf );
-		$getargs = '' unless defined $getargs;
-		$rsyncargs = '' unless defined $rsyncargs;
 	}
 
 	showconfig( "file", $extconf );
@@ -1391,32 +938,28 @@ sub main() {
 		  'check|checkonly!'
 		, 'colour|color!'
 		, 'configured|config!'
+		, 'curl=s' =>				\$curl
 		, 'debug!' =>				\$debug
 		, 'delete|del!' =>			\$delete
 		, 'distloc|dist|d=s' =>		\$distloc
 		, 'extract|unpack!'
-		, 'extra|beta=s' =>			\$extra
-		, 'get!'
 		, 'gnupath|gnu|path|g=s' =>	\$gnupath
 		, 'help|h'
-		, 'index|file=s' =>			\$indexfile
 		, 'instloc|inst|i=s' =>		\$instloc
-		, 'mirror=s'
 		, 'oldloc|old|o=s' =>		\$oldloc
-		, 'pax=s' =>				\$pax
+		, 'password|pass=s' =>	\$sgipass
 		, 'pretend|p!'
-		, 'rsync=s' =>				\$rsync
+		, 'release|r=s'
 		, 'safe!' =>				\$safe
 		, 'show|showconfig:s'
 		, 'swmgr|launch|s!' =>		\$launchswmgr
-		, 'sync!'
 		, 'tar=s' =>				\$tar
 		, 'tmploc|tmp|temp|t=s' =>	\$tmploc
 		, 'update!' =>				\$updatecheck
+		, 'user=s' =>				\$sgiuser
 		, 'verbose!' =>				\$verbose
 		, 'version|v'
 		, 'warn|w=i' =>				\$warnlevel
-		, 'wget=s' =>				\$get
 		, 'width|columns=i'
 	) or die "\n";
 
@@ -1425,12 +968,11 @@ sub main() {
 		exit 0;
 	}
 	if( defined $opt_help and $opt_help ) {
-		print STDOUT "Usage: $name [settings] [options] [--get|--sync] [[-- |--mirror=]<mirror>]\n\n";
+		print STDOUT "Usage: $name --user=<username> --pass=<password> [settings] [options]\n\n";
 		print STDOUT "                 settings = { [--dist=<path>] [--inst=<path>] [--temp=<path>]\n";
 		print STDOUT "                              [--old=<directory>]\n";
-		print STDOUT "                              [--extra=\"<paths>\"] }\n";
-		print STDOUT "                              [--path=<path>] [--rsync=<path>] [--tar=<path>]\n";
-		print STDOUT "                              [--pax=<path>] [--wget=<path>]\n";
+		print STDOUT "                              [--release=<IRIX release>]\n";
+		print STDOUT "                              [--path=<path>] [--tar=<path>] [--curl=<path>]\n";
 		print STDOUT "                              [--warn=<number>] [--width=<number>]\n";
 		print STDOUT "                            }\n";
 		print STDOUT "                 options  = { [--colour] [--configured] [--debug]\n";
@@ -1443,10 +985,14 @@ sub main() {
 		exit 0;
 	}
 
+	if( not defined $sgiuser or not defined $sgipass ) {
+		die "${fatal}A username and password must be supplied!\n";
+	}
+
 	if( not defined $opt_colour or ( defined $opt_colour and $opt_colour ) ) {
 		$usecolour = TRUE;
 
-		if( defined( $ENV{ TERM } ) and $ENV{ TERM } =~ /xterm|screen/ ) {
+		if( defined( $ENV{ TERM } ) and $ENV{ TERM } =~ /xterm/ ) {
 			$termcolour = TRUE;
 			$reset = "\e[0m";
 			$bold = "\e[1m";
@@ -1487,34 +1033,8 @@ sub main() {
 	$plus    = "$plus$reset"    if $plus    !~ m/\e\[0m$/;
 	$star    = "$star$reset"    if $star    !~ m/\e\[0m$/;
 
-	$pretend = TRUE if $debug;
 	if( defined $opt_pretend and not $opt_pretend ) {
 		$pretend = FALSE;
-	}
-
-	if( not defined $opt_mirror and defined ( my $arg = shift( @ARGV ) ) ) {
-		$opt_mirror = $arg;
-	}
-	if( defined $opt_sync and $opt_sync ) {
-		$rmirror = $opt_mirror if defined $opt_mirror;
-		$useget = FALSE;
-	} else {
-		$mirror = $opt_mirror if defined $opt_mirror;
-		$useget = TRUE;
-	}
-	if( defined $opt_wget and $opt_wget =~ m/ / ) {
-		my @newget = split( /\s+/, $get );
-		$get = shift( @newget );
-		$getargs = join( ' ', @newget );
-	}
-	if( defined $opt_rsync and $opt_rsync =~ m/ / ) {
-		my @newrsync = split( /\s+/, $rsync );
-		$rsync = shift( @newrsync );
-		$rsyncargs = join( ' ', @newrsync );
-		$rsyncdefargs = '';
-	}
-	if( defined $indexfile and $indexfile ) {
-		die "${fatal}Cannot read $indexfile\n" unless -r $indexfile;
 	}
 	if( defined $opt_configured and $opt_configured ) {
 		$configured = TRUE;
@@ -1526,42 +1046,61 @@ sub main() {
 		$width = int( $opt_width ) - 2;
 	}
 
-	if( ( defined $opt_get and $opt_get ) and
-	    ( defined $opt_sync and $opt_sync ) ) {
-		print STDOUT "${fatal}Cannot use sync and get together - please "
-		           . "specify at most one of\n";
-		print STDOUT "        --get and --sync\n";
-		exit 1;
+	if( not defined $release ) {
+		if( not defined $opt_release ) {
+			if( $opt_release = `/sbin/uname -R` ) {
+				$opt_release =~ s/^.* //;
+				chomp $opt_release;
+			} else {
+				print STDERR "${warn}IRIX release not defined - defaulting to " . RELEASE . "\n";
+				$opt_release = RELEASE;
+			}
+		}
+	} else {
+		$opt_release = $release;
 	}
+	$opt_release =~ s/\.0$// if defined $opt_release;
+	if( defined $opt_release and $opt_release =~ m/^([5,6]\.[1-5])\.?([1-9][0-9]?)?([mf])?$/ ) {
+		my $major = $1 if defined $1;
+		my $minor = $2 if defined $2;
+		my $stream = $3 if defined $3;
+
+		if( defined $major ) {
+			if( defined $minor and "6.5" eq $major and ( $minor > 1 and $minor < 22 ) and not defined $stream ) {
+				print STDERR "${warn}IRIX releases from 6.5.2 to 6.5.21 require a feature stream\n";
+				$opt_release = "${major}.${minor}m";
+			}
+		} else {
+			$release = $opt_release if not defined $release;
+			undef $opt_release;
+		}
+
+		$opt_release =~ s/[mf]$// if defined $major and defined $minor and "6.5" eq $major and ( $minor < 2 or $minor > 21 );
+	} else {
+		$release = $opt_release if not defined $release;
+		undef $opt_release;
+	}
+	if( not defined $opt_release ) {
+		print "${warn}Unrecognised IRIX release \"$release\"\n" if defined $release;
+		$opt_release = RELEASE;
+	}
+	$release = $opt_release;
+	print STDERR "\n";
+	print STDERR "${info}Using IRIX release $release\n\n";
 
 	if( defined $gnupath and -d $gnupath and -x "$gnupath/bash" ) {
-		eval { chomp( $md5sum = `$gnupath/bash -c "type -pf $gnupath/md5sum"` ) }
-			if( $usemd5sum and ( not defined $md5sum or not -x $md5sum ) );
+		eval { chomp( $curl = `$gnupath/bash -c "type -pf $gnupath/curl"` ) }
+			if( not defined $curl or not -x $curl );
 		eval { chomp( $tar = `$gnupath/bash -c "type -pf $gnupath/tar"` ) }
 			if( not defined $tar or not -x $tar );
-		eval { chomp( $pax = `$gnupath/bash -c "type -pf $gnupath/pax"` ) }
-			if( not defined $pax or not -x $pax );
-		eval { chomp( $get = `$gnupath/bash -c "type -pf $gnupath/wget"` ) }
-			if( not defined $get or not -x $get );
-		eval { chomp( $rsync = `$gnupath/bash -c "type -pf $gnupath/rsync"` ) }
-			if( not defined $rsync or not -x $rsync );
 	}
-	eval { chomp( $md5sum = `bash -c "type -pf md5sum"` ) }
-		if( $usemd5sum and ( not defined $md5sum or not -x $md5sum ) );
 	eval { chomp( $tar = `bash -c "type -pf tar"` ) }
 		if( not defined $tar or not -x $tar );
-	eval { chomp( $pax = `bash -c "type -pf pax"` ) }
-		if( not defined $pax or not -x $pax );
-	eval { chomp( $get = `bash -c "type -pf wget"` ) }
-		if( not defined $get or not -x $get );
-	eval { chomp( $rsync = `bash -c "type -pf rsync"` ) }
-		if( not defined $rsync or not -x $rsync );
+	eval { chomp( $curl = `bash -c "type -pf curl"` ) }
+		if( not defined $curl or not -x $curl );
 
-	$md5sum = undef unless defined $md5sum and -x $md5sum;
-	$tar = undef unless defined $tar and -x $tar;
-	$pax = undef unless defined $pax and -x $pax;
-	$get = undef unless defined $get and -x $get;
-	$rsync = undef unless defined $rsync and -x $rsync;
+	$tar = undef unless -x $tar;
+	$curl = undef unless -x $curl;
 
 	if( defined $opt_check and $opt_check ) {
 		my $latest = checkforupdate( TRUE );
@@ -1578,13 +1117,13 @@ sub main() {
 
 	if( defined $opt_show ) {
 		if( $opt_show eq "default" or $opt_show eq "file" ) {
-			die "Uncaught show option: $opt_show\n";
+			die "${fatal}Uncaught show option: $opt_show\n";
 		} elsif( $opt_show eq "" or $opt_show eq "actual" ) {
 			print STDOUT "$name " . VERSION . " actual values:\n";
 			dumpconfig( $extconf );
 			exit 0;
 		} else {
-			die "Unknown argument: $opt_show\n";
+			die "${fatal}Unknown argument: $opt_show\n";
 		}
 	}
 
@@ -1595,33 +1134,17 @@ sub main() {
 		           . "\n\n";
 	}
 
-	if( defined $rsync and $rsync eq "/usr/sbin/rsync" ) {
-		print STDERR "${warn}RCS Rsync found instead of rsync - please "
-		    . "specify --rsync or --path\n";
-		$rsync = undef;
-	}
-
-	die "$name has not yet been configured - please edit\n  $name.conf and "
+	die "$name has not yet been configured - please edit\n  $extconf and "
 	  . "ensure that sane defaults are set before\n  re-running.\n"
 		if defined( $configured ) and ( not $configured ) and ( not $show );
 
 	die "${fatal}Working directories not set\n"
 		unless defined $distloc and defined $instloc;
-	die "${fatal}Digest::MD5 unavailable and cannot find working \'md5sum\' "
-	  . "binary\n"
-		unless not $usemd5sum or ( defined $md5sum and -x $md5sum );
 	die "${fatal}Cannot find working \'tar\' binary\n"
 		unless defined $tar and -x $tar;
-	die "${fatal}Cannot find working \'get\' binary\n"
-		unless defined $get and -x $get;
-	die "${fatal}Cannot find working \'sync\' binary\n"
-		unless $useget or ( defined $rsync and -x $rsync );
+	die "${fatal}Cannot find working \'curl\' binary\n"
+		unless defined $curl and -x $curl;
 
-	print STDERR "${warn}Cannot find working \'pax\' binary - archives with "
-		. "broken paths cannot be repaired\n"
-		unless defined $pax and -x $pax;
-
-	$rsyncargs = join( ' ', $rsyncdefargs, $rsyncargs );
 	$width = undef if $debug;
 
 	if( $updatecheck ) {
@@ -1638,34 +1161,151 @@ sub main() {
 		}
 	}
 
-	my $error;
-	if( defined $useget and not $useget ) {
-		$error = syncdist( $distloc, $instloc, $oldloc );
-	} else {
-		$error = getdist( $distloc, $instloc, $oldloc, $delete );
+	my $error = undef;
+	my $document = undef;
+	my $seenlicense = FALSE;
 
-		if( not ( defined $indexfile or defined $error ) and defined $extra ) {
-			my $oldmirror = $mirror;
-			foreach my $path ( split /\s+/, $extra ) {
-				print STDOUT "\n";
-				if( $path =~ m!^(ht|f)tp://! ) {
-					$mirror = $path;
-#					$path =~ s#^.*/##;
-#					$path =~ s#&.*$##;
-#					$path =~ s#;.*$##;
-#					$path =~ s#\?.*$##; ## Fix vim-syntax mis-highlighting
-					$path =~ s#^.*/([^/&;?]+)([&;?].*)?$#$1#; ## Fix highlights
+	$curlargs = "--insecure --compressed --cookie-jar '$tmploc/.$name.cookies' --cookie '$tmploc/.$name.cookies'";
+
+	my $host = "support.sgi.com";
+	my $path = "login";
+	my $page = 'http://support.sgi.com/';
+	my $form = undef;
+
+#	if( $debug and $verbose ) {
+#		print curlget( $page, $form, $fetch++ );
+#	} else {
+		die "Page fetch error\n" if not defined curlget( $page, $form, $fetch++ );
+#	}
+
+	$page = 'https://support.sgi.com/login';
+	$form = "PAGE_NAME=LOGIN&USER_ID=$sgiuser&PASSWORD=$sgipass";
+	print STDOUT "      Logging in with username $sgiuser, password $sgipass ...\n" if defined $sgiuser and defined $sgipass;
+#	if( $debug and $verbose ) {
+#		print curlget( $page, $form, $fetch++ );
+#	} else {
+		die "Page fetch error\n" if not defined curlget( $page, $form, $fetch++ );
+#	}
+
+	$page = "https://support.sgi.com/browse_request/irix_patches_by_os";
+	$form = "PAGE_LIST_SIZE=-1";
+	
+	$document = curlget( $page, $form, $fetch++ );
+#	if( $debug and $verbose and defined $document ) {
+#		print $document;
+#	} else {
+		die "Page fetch error\n" if not defined $document;
+#	}
+	if( $debug or $document !~ m/$release/i ) {
+		my $releaseokay = FALSE;
+		my @document = split( /\n/, $document );
+		foreach my $line ( grep( m!<td align="left" >IRIX ([0-9.mf]+)</td>!g, @document ) ) {
+			my $version = $1 if $line =~ m!<td align="left" >IRIX ([0-9.mf]*)</td>!i;
+			ifverbose( "INFO: Found IRIX release " . $version . "\n" ) if defined $version;
+			$releaseokay = TRUE if $version eq $release;
+		}
+		die "${fatal}IRIX release $release not found\n" if not $releaseokay;
+	}
+	ifverbose( "${notice}IRIX release $release found...\n" );
+
+	$page = "https://support.sgi.com/browse_request/irix_patch_browse_results?OPERATING_SYSTEM=IRIX+$release";
+	$form = "PAGE_LIST_SIZE=-1";
+	$document = curlget( $page, $form, $fetch++ );
+#	if( $debug and $verbose and defined $document ) {
+#		print $document;
+#	} else {
+		die "Page fetch error\n" if not defined $document;
+#	}
+	my %patches;
+	{
+		$document =~ s/^.*<!-- END LEFT NAV -->[^\n]*\n//s;
+		$document =~ s/<!-- Start Paging Footer -->.*$//s;
+
+		my @document = split( /<tr valign="top"  /, $document );
+		my $count = 0;
+
+		foreach my $section ( @document ) {
+			my ( $patch, $description, $date, $download );
+			if( $section =~ m!<td class="small"><span class="">IRIX Patch ([0-9]+): (.*)</span></td>! ) {
+				$patch = $1 if defined $1;
+				$description = $2 if defined $2;
+			}
+			if( $section =~ m!<td class="small" align="center">(\d{2}-...-\d{4})</td>! ) {
+				$date = $1 if defined $1;
+			}
+			if( $section =~ m!<a  class="boldlink" href="javascript:contentpopup\('([^']+)'\)"! ) {
+				$download = $1 if defined $1;
+			}
+			if( defined $patch and defined $description and defined $date and defined $download ) {
+				$patches{ $patch }{ 'description' } = $description;
+				$patches{ $patch }{ 'date' } = $date;
+				$patches{ $patch }{ 'download' } = $download;
+				$count++;
+			}
+		}
+		die "${fatal}No patches found for IRIX release $release :(\n" if 0 == $count;
+	}
+	if( $debug ) {
+		foreach my $patch ( keys %patches ) {
+			ifdebug( "Patch $patch has download location " . $patches{ $patch }{ 'download' } );
+		}
+	}
+	foreach my $patch ( keys %patches ) {
+		my ( $tardist, $action, $cmd, $location );
+		$page = "https://support.sgi.com" . $patches{ $patch }{ 'download' };
+		$document = curlget( $page, undef, $fetch++ );
+#		if( $debug and $verbose and defined $document ) {
+#			print $document;
+#		} else {
+			die "Page fetch error\n" if not defined $document;
+#		}
+		foreach my $line ( grep( m!<td><a href="terms_conditions\?.*">HTTP</a></td>!g, split( /\n/, $document ) ) ) {
+			$line =~ m!<td><a href="(terms_conditions\?srv=download.sgi.com&amp;pro=http&amp;cmd=\w+)">HTTP</a></td>!;
+			$tardist = $1 if defined $1;
+		}
+		$page =~ s!/[^/]+$!/$tardist!; # Fix hilighting - !
+		$document = curlget( $page, undef, $fetch++ );
+#		if( $debug and $verbose and defined $document ) {
+#			print $document;
+#		} else {
+			die "Page fetch error\n" if not defined $document;
+#		}
+		if( not $seenlicense and $document =~ m!^.*<textarea[^>]+>(.*)</textarea>!s ) {
+			print "\n$1\n\n";
+			$seenlicense = TRUE;
+		}
+
+		$document =~ s/^.*<form method="POST"\n/<form method="POST" /s;
+		if( $document =~ m!action="([^"]+)">!s ) {
+			$action = $1 if defined $1;
+		}
+		if( $document =~ m!name="cmd:string"\s*value="([^"]+)" />!s ) {
+			$cmd = $1 if defined $1;
+		}
+		if( defined $action and defined $cmd ) {
+			$page = "https://support.sgi.com" . $action;
+			$form = "cmd:string=$cmd&srv:string=download.sgi.com&pro:string=http&agree:string=I%20Agree";
+			$document = curlget( $page, $form, $fetch++ );
+#			if( $debug and $verbose and defined $document ) {
+#				print $document;
+#			} else {
+				die "Page fetch error\n" if not defined $document;
+#			}
+			if( $document =~ m!<meta http-equiv="Refresh" content="\d+; URL=([^"]+)">! ) {
+				$location = $1 if defined $1;
+
+				if ( defined $location ) {
+					ifdebug( "Found download location \"$location\" for patch $patch" );
+					$patches{ $patch }{ 'download' } = $location;
 				} else {
-					$mirror = $oldmirror;
-					$mirror =~ s#/current(/)?$#/$path#; ## Fix mis-highlighting
+					ifdebug( "Removing patch $patch - cannot discover download location" );
+					delete $patches{ $patch };
 				}
-				$error = getdist( "$distloc/$path"	# Download location
-				                , "$instloc/$path"	# Installation location
-				                , undef				# Destination for old files
-				                , TRUE );			# Delete old files
 			}
 		}
 	}
+
+	getdist( $distloc, $instloc, $oldloc, $delete, %patches );
 
 	if( $launchswmgr and not defined $error ) {
 		my $command;
@@ -1684,19 +1324,11 @@ sub main() {
 		}
 		if( not defined $error ) {
 			$command .= " -f $instloc";
-			if( defined $extra ) {
-				foreach my $path ( split /\s+/, $extra ) {
-					if( $path =~ m!^(ht|f)tp://! ) {
-						$path =~ s#^.*/([^/&;?]+)([&;?].*)?$#$1#; ##
-					}
-					$command .= " -f $instloc/$path";
-				}
-			}
 			system( $command );
 		}
 	}
 
-	if( defined $error and $error ) {
+	if( defined $error ) {
 		print STDERR "\n$fatal$name encountered an error and aborted:\n";
 		die "\tPlease check the output of \"$name --show\" for configuration "
 		  . "problems\n";
