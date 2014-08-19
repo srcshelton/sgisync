@@ -23,13 +23,16 @@ package sgisync;
 #				with nekosync 1.2r22
 # 0.5			Cleanups and '--list'
 # 0.51			Fix display of which package owns clashing files
+# 0.6			Escape username and password strings
 #
 
 use strict;
 
-use Data::Dumper;
+#use Data::Dumper;
 
-use constant VERSION => "0.51";
+use URI::Escape;
+
+use constant VERSION => "0.6";
 use constant RELEASE => "6.5.30";
 
 use constant TRUE => 1;
@@ -117,7 +120,7 @@ my $warn   = "WARN:   ";
 my $fatal  = "FATAL:  ";
 
 my $fetch = 0;	# Index from zero ;)
-my $globalcounter;
+my $globalcounter = 0;
 my $sgiuser;
 my $sgipass;
 
@@ -143,6 +146,7 @@ sub ifverbose( $;$ ) {
 #		$message =~ s/^\s+// if $message !~ /^\s*$/;
 #		$message = "$info$message$reset\n" if $message !~ /^\s*$/;
 		open ( $OUT, ">&", STDOUT ) or die "${fatal}Cannot dup STDOUT: $!\n";
+		autoflush STDOUT TRUE;
 	}
 	print $OUT $message;
 	close( $OUT );
@@ -451,6 +455,7 @@ sub setupdirs( $$$ ) {
 	$dirs{ "$dloc" } = "Distribution/download" if $dloc;
 	$dirs{ "$iloc" } = "Installation" if $iloc;
 	$dirs{ "$dloc/$oloc" } = "Backup" if $oloc;
+	$dirs{ "$tmploc" } = "Temporary" if $tmploc;
 	foreach my $dir ( keys( %dirs ) ) {
 		my $desc = $dirs{ $dir };
 		if( defined( my $error = safemkdir( "$dir" ) ) ) {
@@ -479,6 +484,8 @@ sub removeoldfiles( $$$\@ ) {
 
 	return undef unless defined $oloc or $delete;
 	return undef unless scalar( @$oldpackages ) and not $safe;
+
+	autoflush STDOUT TRUE;
 
 	if( $delete ) {
 		ifnotverbose( "Removing obsolete files       " );
@@ -1218,7 +1225,7 @@ sub main() {
 #	}
 
 	$page = 'https://support.sgi.com/login';
-	$form = "PAGE_NAME=LOGIN&USER_ID=$sgiuser&PASSWORD=$sgipass";
+	$form = uri_escape( "PAGE_NAME=LOGIN&USER_ID=$sgiuser&PASSWORD=$sgipass" );
 	print STDOUT "      Logging in with username $sgiuser, password $sgipass "
 	           . "...\n" if defined $sgiuser and defined $sgipass and $verbose;
 #	if( $debug and $verbose ) {
