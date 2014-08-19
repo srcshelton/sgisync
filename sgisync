@@ -37,6 +37,7 @@ package sgisync;
 # 0.61			... without needing URI::Escape ;)
 # 0.62			Clean up output, be more permissive with --list
 # 0.63			Better perl version checking
+# 0.64			Ensure that there really is data to download, rather than HTML
 #
 
 #
@@ -51,7 +52,7 @@ use strict;
 #use Data::Dumper;
 #use URI::Escape;
 
-use constant VERSION => "0.63";
+use constant VERSION => "0.64";
 use constant RELEASE => "6.5.30";
 
 use constant TRUE => 1;
@@ -139,6 +140,9 @@ my $notice = "NOTICE: ";
 my $warn   = "WARN:   ";
 my $fatal  = "FATAL:  ";
 
+my %messages;
+my %errors;
+
 my $fetch = 0;	# Index from zero ;)
 my $globalcounter = 0;
 my $sgiuser;
@@ -223,7 +227,7 @@ sub qopen( *;$$ ) {
 		or die "${fatal}Cannot dup STDERR: $!\n";
 	open( STDERR, ">/dev/null" ) or die "${fatal}Cannot open /dev/null: $!\n";
 
-	my ( $return, $bang);
+	my ( $return, $bang );
 	eval {
 		if ( scalar @_ == 1 ) {
 			$return = open( $file, shift );
@@ -589,8 +593,6 @@ sub findorphanfiles( $\% ) {
 sub unpackfiles( \@$$ ) {
 	my ( $files, $dloc, $iloc ) = @_;
 	my %instfiles;
-	my %errors;
-	my %messages;
 	my $lastname;
 
 	return FALSE unless scalar( @$files );
@@ -718,16 +720,6 @@ sub unpackfiles( \@$$ ) {
 	}
 
 	print STDOUT "\n";
-	print STDERR "\n" if( %messages );
-	foreach my $message ( sort( values( %messages ) ) ) {
-		print STDERR "$info$message\n";
-	}
-	print STDERR "\n" if( %messages );
-	print STDERR "\n" if( %errors and not %messages );
-	foreach my $message ( sort( values( %errors ) ) ) {
-		print STDERR "$warn$message\n";
-	}
-	print STDERR "\n" if( %errors );
 
 	if( $continue ) {
 		return findorphanfiles( $iloc, %instfiles );
@@ -820,7 +812,7 @@ sub syncdist( $$$$\% ) {
 			$patch =~ s/^0+//g;
 			if( not( exists $patches -> { $patch } ) ) {
 				push( @oldpackages, "$dloc/$file" );
-				ifverbose( "${yellow}INFO:    $file removed from remote "
+				ifverbose( "${notice}$file removed from remote "
 				         . "archive\n", $dash );
 				$counter++ if defined $width;
 			}
@@ -1053,7 +1045,7 @@ sub main() {
 	if( not defined $opt_colour or ( defined $opt_colour and $opt_colour ) ) {
 		$usecolour = TRUE;
 
-		if( defined( $ENV{ TERM } ) and $ENV{ TERM } =~ /xterm/ ) {
+		if( defined( $ENV{ TERM } ) and $ENV{ TERM } =~ /xterm|screen/ ) {
 			$termcolour = TRUE;
 			$reset = "\e[0m";
 			$bold = "\e[1m";
@@ -1246,7 +1238,6 @@ sub main() {
 		$escape = \&uri_escape;
 	}
 
-	my $error = undef;
 	my $document = undef;
 	my $seenlicense = FALSE;
 
@@ -1313,7 +1304,7 @@ sub main() {
 		                         @document ) ) {
 			my $version = $1
 			    if $line =~ m!<td align="left" >IRIX ([0-9.mf]*)</td>!i;
-			ifverbose( "INFO: Found IRIX release " . $version . "\n",
+			ifverbose( "${info}Found IRIX release " . $version . "\n",
 			    ( $list ? $version . ( $counter++ % 4 ? "\t"
 			                                          : "\n" )
 			            : undef ) ) if defined $version;
@@ -1358,6 +1349,13 @@ sub main() {
 			if( $section =~ m!<a  class="boldlink" href="javascript:contentpopup\('([^']+)'\)"! ) {
 				$download = $1 if defined $1;
 			}
+			if( $section =~ m!<img src="/media/images/common/html_doc.gif"! ) {
+				ifverbose( "${warn}Patch $patch has HTML content-type - ignoring\n" );
+				$errors{ $patch } = "Patch $patch will not be downloaded as it is flagged as HTML";
+				undef $description;
+				undef $date;
+				undef $download;
+			}
 			if( defined $patch and defined $description and
 			    defined $date and defined $download ) {
 				$patches{ $patch }{ 'description' } = $description;
@@ -1388,8 +1386,12 @@ sub main() {
 			$line =~ m!<td><a href="(terms_conditions\?srv=download.sgi.com&amp;pro=http&amp;cmd=\w+)">HTTP</a></td>!;
 			$tardist = $1 if defined $1;
 		}
-		$page =~ s!/[^/]+$!/$tardist!; #!# Fix hilighting
-		$document = curlget( $page, undef, $fetch++ );
+		if( defined $tardist )  {
+			$page =~ s!/[^/]+$!/$tardist!; #!# Fix hilighting
+			$document = curlget( $page, undef, $fetch++ );
+		} else {
+			die "\nCannot find tardist in document \"$page\"\n";
+		}
 #		if( $debug and $verbose and defined $document ) {
 #			print $document;
 #		} else {
@@ -1443,7 +1445,31 @@ sub main() {
 
 	syncdist( $distloc, $instloc, $oldloc, $delete, %patches );
 
-	if( $launchswmgr and not defined $error ) {
+#	print STDERR "\n" if( %messages );
+#	foreach my $message ( sort( values( %messages ) ) ) {
+#		print STDERR "$info$message\n";
+#	}
+#	print STDERR "\n" if( %messages );
+#	print STDERR "\n" if( %errors and not %messages );
+#	foreach my $message ( sort( values( %errors ) ) ) {
+#		print STDERR "$warn$message\n";
+#	}
+#	print STDERR "\n" if( %errors );
+
+	print STDERR "\n" if( %errors );
+	foreach my $message ( sort( values( %errors ) ) ) {
+		print STDERR "$warn$message\n";
+	}
+	print STDERR "\n" if( %errors );
+	print STDERR "\n" if( %messages and not %errors );
+	foreach my $message ( sort( values( %messages ) ) ) {
+		print STDERR "$info$message\n";
+	}
+	print STDERR "\n" if( %messages );
+
+	my $error;
+
+	if( $launchswmgr ) {
 		my $command;
 		if( defined $ENV{ DISPLAY } and $ENV{ DISPLAY }
 		    and -x "/usr/sbin/SoftwareManager"
