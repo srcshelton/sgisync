@@ -12,21 +12,23 @@ package sgisync;
 #
 ###############################################################################
 #
-# Version:		0.4
-# Last updated:	23/01/2008	Stuart Shelton [SRCS]
+# Version:		0.5
+# Last updated:	24/01/2008	Stuart Shelton [SRCS]
 #
 # Changes:
 # 0.1			Fork from nekosync
 # 0.2			Sync with nekosync 1.2r21, merge with sgifetch
 # 0.3			Can now actually determine download locations!
-# 0.4			Download and unpack functionality added, sync with nekosync 1.2r22
+# 0.4			Download and unpack functionality added, sync
+#				with nekosync 1.2r22
+# 0.5			Cleanups and '--list'
 #
 
 use strict;
 
 use Data::Dumper;
 
-use constant VERSION => "0.4";
+use constant VERSION => "0.5";
 use constant RELEASE => "6.5.30";
 
 use constant TRUE => 1;
@@ -58,7 +60,7 @@ sub setupdirs( $$$ );
 sub removeoldfiles( $$$\@ );
 sub findorphanfiles( $\% );
 sub unpackfiles( \@$$ );
-sub getdist( $$$$\% );
+sub syncdist( $$$$\% );
 sub curlget( $;$$$$$ );
 sub main();
 
@@ -85,6 +87,7 @@ my $safe = TRUE;
 my $pretend = TRUE;
 my $delete = FALSE;
 my $extract = TRUE;
+my $list = FALSE;
 
 my $warnlevel = 5;
 
@@ -113,6 +116,7 @@ my $warn   = "WARN:   ";
 my $fatal  = "FATAL:  ";
 
 my $fetch = 0;	# Index from zero ;)
+my $globalcounter;
 my $sgiuser;
 my $sgipass;
 
@@ -592,8 +596,8 @@ sub unpackfiles( \@$$ ) {
 				next if not $filename;
 
 				if( exists $instfiles{ $filename } ) {
-					$messages{ $file } = "$filename from $name clashes with files from "
-					                   . "another package"
+					$messages{ $file } = "$filename from $name clashes with "
+					                   . "files from another package"
 					                   . ( defined $lastname
 					                     ? "\n\t(probably $lastname)" : "" );
 				} else {
@@ -696,7 +700,7 @@ sub unpackfiles( \@$$ ) {
 	}
 } # unpackfiles
 
-sub getdist( $$$$\% ) {
+sub syncdist( $$$$\% ) {
 	my ( $dloc, $iloc, $oloc, $delete, $patches ) = @_;
 	my @downloads;
 	my @oldpackages;
@@ -704,11 +708,10 @@ sub getdist( $$$$\% ) {
 	my $checksum;
 
 	return FALSE unless defined $dloc;
+	return FALSE unless -d $dloc and -w $dloc;
 	return FALSE unless $patches;
 	return FALSE unless defined $curl and -x $curl;
 
-	setupdirs( $dloc, $iloc, $oloc );
-	return FALSE unless -d $dloc and -w $dloc;
 
 	autoflush STDOUT TRUE;
 
@@ -721,17 +724,20 @@ sub getdist( $$$$\% ) {
 	ifnotverbose( "\nChecking for updated files   " );
 	foreach my $patch ( sort( keys( %$patches ) ) ) {
 		my $download = $patches -> { $patch }{ 'download' };
-		( my $file = $download ) =~ s!^.*/([^/]+)$!$1!;		#!# Fix vim syntax highlighting
+		( my $file = $download ) =~ s!^.*/([^/]+)$!$1!;		#!# Fix highlighting
 		$patches -> { $patch }{ 'file' } = $file;
 
-		if( curlget( $download, undef, $fetch++, "--head", TRUE ) =~ m/\r\nContent-Length:\s+(\d+)\r\n/is ) {
+		if( curlget( $download, undef, $fetch++, "--head", TRUE ) =~
+		    m/\r\nContent-Length:\s+(\d+)\r\n/is ) {
 			$patches -> { $patch }{ 'size' } = $1;
 		} else {
-			ifdebug( "Could not retrieve size for $file from server: removing" );
+			ifdebug( "Could not retrieve size for $file from server: removing "
+			       . "patch $patch" );
 			delete $patches -> { $patch };
 			next;
 		}
-		ifdebug( "Found size " . $patches -> { $patch }{ 'size' } . " for $file\n" );
+		ifdebug( "Found size " . $patches -> { $patch }{ 'size' }
+		       . " for $file\n" );
 
 		ifdebug( "Looking for " . $file . "\n" );
 		if( -r $file ) {
@@ -747,8 +753,8 @@ sub getdist( $$$$\% ) {
 				$counter++ if defined $width;
 			} else {
 				ifverbose( "$file: File size $size does not match server "
-				         . "file length " . $patches -> { $patch }{ 'size' } . "\n"
-				         , $star );
+				         . "file length " . $patches -> { $patch }{ 'size' }
+				         . "\n", $star );
 				push( @downloads, $download );
 				$counter++ if defined $width;
 			}
@@ -816,7 +822,7 @@ sub getdist( $$$$\% ) {
 	$number = 0;
 
 	while( my $download = pop @downloads ) {
-		( my $file = $download ) =~ s!^.*/([^/]+)$!$1!;		#!# Fix vim syntax highlighting
+		( my $file = $download ) =~ s!^.*/([^/]+)$!$1!;		#!# Fix highlighting
 		open( my $OutFile, ">", $dloc . "/" . $file )
 			or die "${fatal}Cannot open $file for writing: $!\n";
 		print $OutFile curlget( $download, undef, $number++, undef, FALSE, 10 );
@@ -830,7 +836,7 @@ sub getdist( $$$$\% ) {
 	unpackfiles( @files, $dloc, $iloc ) if defined $iloc and $extract;
 	removeoldfiles( $dloc, $oloc, $delete, @oldpackages );
 	return undef;
-} # getdist
+} # syncdist
 
 sub curlget( $;$$$$$ ) {
 	my ( $page, $form, $number, $options, $quiet, $speed ) = @_;
@@ -842,28 +848,38 @@ sub curlget( $;$$$$$ ) {
 	$modulus = $speed if defined $speed;
 	$quiet = FALSE if not defined $quiet;
 
-	my $args = ( defined $options ? join( ' ', $options, $curlargs ) : $curlargs );
-	my $command = join( ' ', $curl, $args, ( defined $form ? '-d "' . $form . '"' : '' ), '--location "' . $page . '"', "|" );
+	my $args = ( defined $options ? join( ' ', $options, $curlargs )
+	                              : $curlargs );
+	my $command = join( ' ', $curl, $args,
+	                    ( defined $form ? '-d "' . $form . '"'
+	                                    : ''
+	                    ), '--location "' . $page . '"', "|" );
 	( my $displaypage = $page ) =~ s/\?.*$//;
-	if( not $quiet ) {
-		print STDOUT "(" . ( $number < 100 ? " " : "" ) . ( $number < 10 ? " " : "" ) . $number . ") Fetching $displaypage ...\t";
+	if( not $quiet and $verbose ) {
+		print STDOUT "(" . ( $number < 100 ? " "
+		                                   : "" )
+		                 . ( $number <  10 ? " "
+		                                   : "" )
+		                 . $number . ") $displaypage ...  ";
 		print STDOUT "\n" if $debug;
 		ifdebug( "Running \"$command\"" );
 	}
 	qopen( my $InFile, $command )
 	    or die "${fatal}Cannot open pipe to $curl: $!\n";
-	my $counter = 0;
+	my $counter = $verbose ? 0 : $globalcounter;
 	my $iteration = 0;
 	my @characters = ( '/', '-', '\\', '|' );
+	my $size = scalar( @characters );
 	while( my $data = <$InFile> ) {
-		if( not $debug and not $quiet and 0 eq ( $iteration++ % $modulus ) ) {
+		if( not $debug and not $quiet and not $verbose and 0 eq ( $iteration++ % $modulus ) ) {
 			print STDOUT "\b"
-			           . $characters[ $counter++ % scalar( @characters ) ];
+			           . $characters[ $counter++ % $size ];
 		}
 		$output .= "$data";
 	}
+	$globalcounter = $counter % $size if not $verbose;
 	if( close( $InFile ) ) {
-		print STDOUT "\bdone\n" if not $debug and not $quiet;
+		print STDOUT "\bdone\n" if not $quiet and not $debug and $verbose;
 		return $output;
 	} else {
 		ifnotverbose( "\b\n" ) if not $quiet;
@@ -946,6 +962,7 @@ sub main() {
 		, 'gnupath|gnu|path|g=s' =>	\$gnupath
 		, 'help|h'
 		, 'instloc|inst|i=s' =>		\$instloc
+		, 'list|l!' =>				\$list
 		, 'oldloc|old|o=s' =>		\$oldloc
 		, 'password|pass=s' =>	\$sgipass
 		, 'pretend|p!'
@@ -968,7 +985,7 @@ sub main() {
 		exit 0;
 	}
 	if( defined $opt_help and $opt_help ) {
-		print STDOUT "Usage: $name --user=<username> --pass=<password> [settings] [options]\n\n";
+		print STDOUT "Usage: $name [--user=<username>] [--pass=<password>] [settings] [options]\n\n";
 		print STDOUT "                 settings = { [--dist=<path>] [--inst=<path>] [--temp=<path>]\n";
 		print STDOUT "                              [--old=<directory>]\n";
 		print STDOUT "                              [--release=<IRIX release>]\n";
@@ -976,8 +993,8 @@ sub main() {
 		print STDOUT "                              [--warn=<number>] [--width=<number>]\n";
 		print STDOUT "                            }\n";
 		print STDOUT "                 options  = { [--colour] [--configured] [--debug]\n";
-		print STDOUT "                              [--delete] [--extract] [--pretend] [--safe]\n";
-		print STDOUT "                              [--showconfig[=default|=file|=actual]]\n";
+		print STDOUT "                              [--delete] [--extract] [--list] [--pretend]\n";
+		print STDOUT "                              [--safe] [--showconfig[=default|=file|=actual]]\n";
 		print STDOUT "                              [--swmgr] [--update] [--verbose]\n";
 		print STDOUT "                            }\n";
 		print STDOUT "\n";
@@ -1052,7 +1069,8 @@ sub main() {
 				$opt_release =~ s/^.* //;
 				chomp $opt_release;
 			} else {
-				print STDERR "${warn}IRIX release not defined - defaulting to " . RELEASE . "\n";
+				print STDERR "${warn}IRIX release not defined - defaulting to "
+				           . RELEASE . "\n";
 				$opt_release = RELEASE;
 			}
 		}
@@ -1060,14 +1078,17 @@ sub main() {
 		$opt_release = $release;
 	}
 	$opt_release =~ s/\.0$// if defined $opt_release;
-	if( defined $opt_release and $opt_release =~ m/^([5,6]\.[1-5])\.?([1-9][0-9]?)?([mf])?$/ ) {
+	if( defined $opt_release and
+	    $opt_release =~ m/^([5,6]\.[1-5])\.?([1-9][0-9]?)?([mf])?$/ ) {
 		my $major = $1 if defined $1;
 		my $minor = $2 if defined $2;
 		my $stream = $3 if defined $3;
 
 		if( defined $major ) {
-			if( defined $minor and "6.5" eq $major and ( $minor > 1 and $minor < 22 ) and not defined $stream ) {
-				print STDERR "${warn}IRIX releases from 6.5.2 to 6.5.21 require a feature stream\n";
+			if( defined $minor and "6.5" eq $major and
+			    ( $minor > 1 and $minor < 22 ) and not defined $stream ) {
+				print STDERR "${warn}IRIX releases from 6.5.2 to 6.5.21 "
+				           . "require a feature stream\n";
 				$opt_release = "${major}.${minor}m";
 			}
 		} else {
@@ -1075,18 +1096,22 @@ sub main() {
 			undef $opt_release;
 		}
 
-		$opt_release =~ s/[mf]$// if defined $major and defined $minor and "6.5" eq $major and ( $minor < 2 or $minor > 21 );
+		$opt_release =~ s/[mf]$// if defined $major and defined $minor and
+		    "6.5" eq $major and ( $minor < 2 or $minor > 21 );
 	} else {
 		$release = $opt_release if not defined $release;
 		undef $opt_release;
 	}
 	if( not defined $opt_release ) {
-		print "${warn}Unrecognised IRIX release \"$release\"\n" if defined $release;
+		print "${warn}Unrecognised IRIX release \"$release\"\n"
+		    if defined $release;
 		$opt_release = RELEASE;
 	}
 	$release = $opt_release;
-	print STDERR "\n";
-	print STDERR "${info}Using IRIX release $release\n\n";
+	if( not $list ) {
+		print STDERR "\n";
+		print STDERR "${info}Using IRIX release $release\n\n";
+	}
 
 	if( defined $gnupath and -d $gnupath and -x "$gnupath/bash" ) {
 		eval { chomp( $curl = `$gnupath/bash -c "type -pf $gnupath/curl"` ) }
@@ -1165,26 +1190,38 @@ sub main() {
 	my $document = undef;
 	my $seenlicense = FALSE;
 
-	$curlargs = "--insecure --compressed --cookie-jar '$tmploc/.$name.cookies' --cookie '$tmploc/.$name.cookies'";
+	$curlargs = "--insecure --compressed --cookie-jar '$tmploc/.$name.cookies' "
+	          . "--cookie '$tmploc/.$name.cookies'";
 
 	my $host = "support.sgi.com";
 	my $path = "login";
 	my $page = 'http://support.sgi.com/';
 	my $form = undef;
 
+	setupdirs( $distloc, $instloc, $oldloc );
+	die "${fatal}No write access to \"$distloc\"\n" unless -d $distloc and -w $distloc;
+	die "${fatal}No write access to \"$instloc\"\n" unless -d $instloc and -w $instloc;
+	die "${fatal}No write access to \"$distloc/$oldloc\"\n" if not $delete and ( not -d "$distloc/$oldloc" or not -w "$distloc/$oldloc/" );
+
+#	return FALSE unless -d $dloc and -w $dloc;
+	print STDOUT "Fetching data from support.sgi.com, please wait ...  " if not $verbose;
+
 #	if( $debug and $verbose ) {
 #		print curlget( $page, $form, $fetch++ );
 #	} else {
-		die "Page fetch error\n" if not defined curlget( $page, $form, $fetch++ );
+		die "Page fetch error\n"
+		    if not defined curlget( $page, $form, $fetch++ );
 #	}
 
 	$page = 'https://support.sgi.com/login';
 	$form = "PAGE_NAME=LOGIN&USER_ID=$sgiuser&PASSWORD=$sgipass";
-	print STDOUT "      Logging in with username $sgiuser, password $sgipass ...\n" if defined $sgiuser and defined $sgipass;
+	print STDOUT "      Logging in with username $sgiuser, password $sgipass "
+	           . "...\n" if defined $sgiuser and defined $sgipass and $verbose;
 #	if( $debug and $verbose ) {
 #		print curlget( $page, $form, $fetch++ );
 #	} else {
-		die "Page fetch error\n" if not defined curlget( $page, $form, $fetch++ );
+		die "Page fetch error\n"
+		    if not defined curlget( $page, $form, $fetch++ );
 #	}
 
 	$page = "https://support.sgi.com/browse_request/irix_patches_by_os";
@@ -1196,19 +1233,31 @@ sub main() {
 #	} else {
 		die "Page fetch error\n" if not defined $document;
 #	}
-	if( $debug or $document !~ m/$release/i ) {
+	if( $debug or $list or $document !~ m/$release/i ) {
 		my $releaseokay = FALSE;
 		my @document = split( /\n/, $document );
-		foreach my $line ( grep( m!<td align="left" >IRIX ([0-9.mf]+)</td>!g, @document ) ) {
-			my $version = $1 if $line =~ m!<td align="left" >IRIX ([0-9.mf]*)</td>!i;
-			ifverbose( "INFO: Found IRIX release " . $version . "\n" ) if defined $version;
+		print STDOUT "\nAvailable IRIX releases:\n" if $list;
+		my $counter = 1;
+		foreach my $line ( grep( m!<td align="left" >IRIX ([0-9.mf]+)</td>!g,
+		                         @document ) ) {
+			my $version = $1
+			    if $line =~ m!<td align="left" >IRIX ([0-9.mf]*)</td>!i;
+			ifverbose( "INFO: Found IRIX release " . $version . "\n",
+			    ( $list ? $version . ( $counter++ % 4 ? "\t"
+			                                          : "\n" )
+			            : undef ) ) if defined $version;
 			$releaseokay = TRUE if $version eq $release;
+		}
+		if( $list ) {
+			print STDOUT "\n";
+			exit 0;
 		}
 		die "${fatal}IRIX release $release not found\n" if not $releaseokay;
 	}
 	ifverbose( "${notice}IRIX release $release found...\n" );
 
-	$page = "https://support.sgi.com/browse_request/irix_patch_browse_results?OPERATING_SYSTEM=IRIX+$release";
+	$page = "https://support.sgi.com/browse_request/irix_patch_browse_results"
+	      . "?OPERATING_SYSTEM=IRIX+$release";
 	$form = "PAGE_LIST_SIZE=-1";
 	$document = curlget( $page, $form, $fetch++ );
 #	if( $debug and $verbose and defined $document ) {
@@ -1236,18 +1285,21 @@ sub main() {
 			if( $section =~ m!<a  class="boldlink" href="javascript:contentpopup\('([^']+)'\)"! ) {
 				$download = $1 if defined $1;
 			}
-			if( defined $patch and defined $description and defined $date and defined $download ) {
+			if( defined $patch and defined $description and
+			    defined $date and defined $download ) {
 				$patches{ $patch }{ 'description' } = $description;
 				$patches{ $patch }{ 'date' } = $date;
 				$patches{ $patch }{ 'download' } = $download;
 				$count++;
 			}
 		}
-		die "${fatal}No patches found for IRIX release $release :(\n" if 0 == $count;
+		die "${fatal}No patches found for IRIX release $release :(\n"
+		    if 0 == $count;
 	}
 	if( $debug ) {
 		foreach my $patch ( keys %patches ) {
-			ifdebug( "Patch $patch has download location " . $patches{ $patch }{ 'download' } );
+			ifdebug( "Patch $patch has download location "
+			       . $patches{ $patch }{ 'download' } );
 		}
 	}
 	foreach my $patch ( keys %patches ) {
@@ -1263,16 +1315,19 @@ sub main() {
 			$line =~ m!<td><a href="(terms_conditions\?srv=download.sgi.com&amp;pro=http&amp;cmd=\w+)">HTTP</a></td>!;
 			$tardist = $1 if defined $1;
 		}
-		$page =~ s!/[^/]+$!/$tardist!; # Fix hilighting - !
+		$page =~ s!/[^/]+$!/$tardist!; #!# Fix hilighting
 		$document = curlget( $page, undef, $fetch++ );
 #		if( $debug and $verbose and defined $document ) {
 #			print $document;
 #		} else {
 			die "Page fetch error\n" if not defined $document;
 #		}
-		if( not $seenlicense and $document =~ m!^.*<textarea[^>]+>(.*)</textarea>!s ) {
+		if( not $seenlicense and
+		    $document =~ m!^.*<textarea[^>]+>(.*)</textarea>!s ) {
+			print "\bdone\n" if not $verbose;
 			print "\n$1\n\n";
 			$seenlicense = TRUE;
+			print STDOUT "Continuing to fetch data from support.sgi.com, please wait ...  " if not $verbose;
 		}
 
 		$document =~ s/^.*<form method="POST"\n/<form method="POST" /s;
@@ -1284,7 +1339,8 @@ sub main() {
 		}
 		if( defined $action and defined $cmd ) {
 			$page = "https://support.sgi.com" . $action;
-			$form = "cmd:string=$cmd&srv:string=download.sgi.com&pro:string=http&agree:string=I%20Agree";
+			$form = "cmd:string=$cmd&srv:string=download.sgi.com&"
+			      . "pro:string=http&agree:string=I%20Agree";
 			$document = curlget( $page, $form, $fetch++ );
 #			if( $debug and $verbose and defined $document ) {
 #				print $document;
@@ -1295,17 +1351,22 @@ sub main() {
 				$location = $1 if defined $1;
 
 				if ( defined $location ) {
-					ifdebug( "Found download location \"$location\" for patch $patch" );
+					ifdebug( "Found download location \"$location\" for "
+					       . "patch $patch" );
 					$patches{ $patch }{ 'download' } = $location;
 				} else {
-					ifdebug( "Removing patch $patch - cannot discover download location" );
+					ifdebug( "Removing patch $patch - cannot discover "
+					       . "download location" );
 					delete $patches{ $patch };
 				}
 			}
 		}
 	}
 
-	getdist( $distloc, $instloc, $oldloc, $delete, %patches );
+	# Close message from main() - this is messy :(
+	print STDOUT "\bdone\n" if not $verbose;
+
+	syncdist( $distloc, $instloc, $oldloc, $delete, %patches );
 
 	if( $launchswmgr and not defined $error ) {
 		my $command;
