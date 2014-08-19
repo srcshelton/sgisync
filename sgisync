@@ -24,15 +24,20 @@ package sgisync;
 # 0.5			Cleanups and '--list'
 # 0.51			Fix display of which package owns clashing files
 # 0.6			Escape username and password strings
+# 0.61			... without needing URI::Escape ;)
+#
+
+#
+# Note that, unfortunately, there is no support for the version of Perl packaged
+# with IRIX.
 #
 
 use strict;
 
 #use Data::Dumper;
+#use URI::Escape;
 
-use URI::Escape;
-
-use constant VERSION => "0.6";
+use constant VERSION => "0.61";
 use constant RELEASE => "6.5.30";
 
 use constant TRUE => 1;
@@ -610,7 +615,7 @@ sub unpackfiles( \@$$ ) {
 					                     ? " (probably $lastname)" : "" );
 				} else {
 					# Change of logic here - only a few files should have a
-					# change of clashing, so only remember tardists with one
+					# chance of clashing, so only remember tardists with one
 					# of these...
 					$lastname = $name if $filename =~ m/swmgr\.README/i or not defined $lastname;
 					my $size = $fields[ 2 ];
@@ -1197,6 +1202,21 @@ sub main() {
 		}
 	}
 
+	my $escape = sub {
+		my( $string ) = @_; 
+		$string =~ s/([^a-zA-Z0-9_\-. ])/uc sprintf( "%%%02x", ord( $1 ) )/eg; 
+		# Convert spaces to plus symbols...
+		$string =~ tr/ /+/;
+		return $string; 
+	};
+
+	eval "use URI::Escape;";
+	if( $@ ) {
+		ifdebug( "URI::Escape not found - using internal routine\n" );
+	} else {
+		$escape = \&uri_escape;
+	}
+
 	my $error = undef;
 	my $document = undef;
 	my $seenlicense = FALSE;
@@ -1225,7 +1245,8 @@ sub main() {
 #	}
 
 	$page = 'https://support.sgi.com/login';
-	$form = uri_escape( "PAGE_NAME=LOGIN&USER_ID=$sgiuser&PASSWORD=$sgipass" );
+#	$form = uri_escape( "PAGE_NAME=LOGIN&USER_ID=$sgiuser&PASSWORD=$sgipass" );
+	$form = $escape -> ( "PAGE_NAME=LOGIN&USER_ID=$sgiuser&PASSWORD=$sgipass" );
 	print STDOUT "      Logging in with username $sgiuser, password $sgipass "
 	           . "...\n" if defined $sgiuser and defined $sgipass and $verbose;
 #	if( $debug and $verbose ) {
