@@ -1,8 +1,18 @@
 #!/bin/sh
+if test -n "`perl -V | grep "5\.0"`"
+then
+	echo -n "FATAL: You appear to have perl "
+	for WORD in `perl -v | grep "^This is "`
+	do  
+		echo $WORD
+	done | grep "5" | xargs echo -n
+	echo ", but version 5.8 is required."
+	exit 1
+fi
 exec perl -wx $0 "$@"
 	if 0;
 #!perl -w
-#line 6
+#line 16
 
 package sgisync;
 
@@ -12,8 +22,8 @@ package sgisync;
 #
 ###############################################################################
 #
-# Version:		0.51
-# Last updated:	01/02/2008	Stuart Shelton [SRCS]
+# Version:		0.63
+# Last updated:	03/06/2008	Stuart Shelton [SRCS]
 #
 # Changes:
 # 0.1			Fork from nekosync
@@ -26,6 +36,7 @@ package sgisync;
 # 0.6			Escape username and password strings
 # 0.61			... without needing URI::Escape ;)
 # 0.62			Clean up output, be more permissive with --list
+# 0.63			Better perl version checking
 #
 
 #
@@ -33,12 +44,14 @@ package sgisync;
 # with IRIX.
 #
 
+require 5.008008;
+
 use strict;
 
 #use Data::Dumper;
 #use URI::Escape;
 
-use constant VERSION => "0.62";
+use constant VERSION => "0.63";
 use constant RELEASE => "6.5.30";
 
 use constant TRUE => 1;
